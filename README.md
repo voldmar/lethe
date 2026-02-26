@@ -202,6 +202,38 @@ systemctl --user daemon-reload
 systemctl --user enable --now lethe
 ```
 
+or for podman
+
+```
+cat > ~/.config/containers/systemd/lethe.container << EOF
+[Unit]
+Description=Lethe Container
+After=local-fs.target
+
+[Container]
+# Reference your locally built image by name — adjust to match yours
+Image=localhost/lethe:latest
+ContainerName=lethe
+Volume=/home/ubuntu/lethe:/workspace
+EnvironmentFile=/home/ubuntu/.config/lethe/container.env
+UserNS=keep-id
+Environment=UV_CACHE_DIR=/workspace/.cache/uv
+Environment=XDG_CACHE_HOME=/workspace/.cache
+
+[Service]
+# Restart the service if it fails
+Restart=on-failure
+TimeoutStartSec=30
+Restart=always
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user start lethe.service
+```
+
 ## Memory System
 
 ### Memory Blocks (Core Memory)
