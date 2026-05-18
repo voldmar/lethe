@@ -188,6 +188,7 @@ async def _process_chat_message(
         event_queue = asyncio.Queue()
 
     from lethe.proxy_bot import ProxyBot
+    from lethe.telegram_reply_context import wrap_message_with_reply_context
     from lethe.tools import clear_telegram_context, set_last_message_id, set_telegram_context
 
     proxy = ProxyBot(event_queue)
@@ -199,9 +200,16 @@ async def _process_chat_message(
         return True
 
     set_telegram_context(proxy, chat_id)
-    target_message_id = metadata.get("target_message_id") or metadata.get("message_id")
-    if target_message_id:
-        set_last_message_id(target_message_id)
+    message_id = metadata.get("message_id")
+    if message_id:
+        set_last_message_id(message_id)
+    reply_to_message_id = metadata.get("reply_to_message_id") or metadata.get("target_message_id")
+    reply_event_fields = {}
+    if reply_to_message_id:
+        reply_event_fields = {
+            "reply_to_message_id": reply_to_message_id,
+            "allow_sending_without_reply": True,
+        }
 
     if _agent:
         removed = _agent.llm.clear_idle_markers()
@@ -236,10 +244,12 @@ async def _process_chat_message(
                     "path": image_path,
                     "caption": "",
                     "message_id": 0,
+                    **reply_event_fields,
                 },
             )
 
-        response = await _agent.chat(message, on_message=on_intermediate, on_image=on_image)
+        turn_message = wrap_message_with_reply_context(message, metadata)
+        response = await _agent.chat(turn_message, on_message=on_intermediate, on_image=on_image)
 
         if not interrupt_check() and response and response.strip():
             await emit(
@@ -248,6 +258,7 @@ async def _process_chat_message(
                     "content": response,
                     "parse_mode": "Markdown",
                     "message_id": 0,
+                    **reply_event_fields,
                 },
             )
 

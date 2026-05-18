@@ -59,7 +59,7 @@ class TestConversationState:
         assert content == "hello"
         assert metadata["user"] == "test"
         assert metadata["message_id"] == 7
-        assert metadata["target_message_id"] == 7
+        assert "target_message_id" not in metadata
         assert len(metadata["message_bundle"]["items"]) == 1
         item = metadata["message_bundle"]["items"][0]
         assert item["index"] == 0
@@ -81,7 +81,7 @@ class TestConversationState:
         assert metadata["a"] == 3
         assert metadata["b"] == 2
         assert metadata["message_id"] == 3
-        assert metadata["target_message_id"] == 3
+        assert "target_message_id" not in metadata
         items = metadata["message_bundle"]["items"]
         assert [item["content"] for item in items] == ["first", "second", "third"]
         assert [item["message_id"] for item in items] == [1, 2, 3]

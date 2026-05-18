@@ -98,20 +98,9 @@ class ConversationState:
         return item
 
     def _resolve_target_message_id(self, bundle_items: list[dict[str, Any]]) -> Optional[int]:
-        for key in (
-            "target_message_id",
-            "reply_to_message_id",
-            "reply_message_id",
-        ):
-            for item in reversed(bundle_items):
-                metadata = item.get("metadata", {})
-                message_id = self._message_id(metadata.get(key))
-                if message_id is not None:
-                    return message_id
-
         for item in reversed(bundle_items):
             metadata = item.get("metadata", {})
-            message_id = self._message_id(metadata.get("message_id"))
+            message_id = self._message_id(metadata.get("target_message_id"))
             if message_id is not None:
                 return message_id
         return None

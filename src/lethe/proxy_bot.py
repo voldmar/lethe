@@ -36,6 +36,15 @@ class ProxyBot:
     async def _put(self, event: dict):
         await self._queue.put(event)
 
+    def _reply_fields(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        fields: dict[str, Any] = {}
+        reply_to_message_id = kwargs.get("reply_to_message_id")
+        if reply_to_message_id:
+            fields["reply_to_message_id"] = reply_to_message_id
+            if "allow_sending_without_reply" in kwargs:
+                fields["allow_sending_without_reply"] = kwargs.get("allow_sending_without_reply")
+        return fields
+
     # --- aiogram.Bot interface used by telegram_tools.py ---
 
     async def send_message(
@@ -46,9 +55,10 @@ class ProxyBot:
         **kwargs,
     ) -> MockMessage:
         mid = self._next_message_id()
+        reply_fields = self._reply_fields(kwargs)
         await self._put({
             "event": "text",
-            "data": {"content": text, "parse_mode": parse_mode, "message_id": mid},
+            "data": {"content": text, "parse_mode": parse_mode, "message_id": mid, **reply_fields},
         })
         return MockMessage(message_id=mid)
 
@@ -60,9 +70,10 @@ class ProxyBot:
         **kwargs,
     ) -> MockMessage:
         mid = self._next_message_id()
+        reply_fields = self._reply_fields(kwargs)
         await self._put({
             "event": "file",
-            "data": {"type": "photo", "path": _resolve_path(photo), "caption": caption or "", "message_id": mid},
+            "data": {"type": "photo", "path": _resolve_path(photo), "caption": caption or "", "message_id": mid, **reply_fields},
         })
         return MockMessage(message_id=mid)
 
@@ -74,9 +85,10 @@ class ProxyBot:
         **kwargs,
     ) -> MockMessage:
         mid = self._next_message_id()
+        reply_fields = self._reply_fields(kwargs)
         await self._put({
             "event": "file",
-            "data": {"type": "animation", "path": _resolve_path(animation), "caption": caption or "", "message_id": mid},
+            "data": {"type": "animation", "path": _resolve_path(animation), "caption": caption or "", "message_id": mid, **reply_fields},
         })
         return MockMessage(message_id=mid)
 
@@ -88,9 +100,10 @@ class ProxyBot:
         **kwargs,
     ) -> MockMessage:
         mid = self._next_message_id()
+        reply_fields = self._reply_fields(kwargs)
         await self._put({
             "event": "file",
-            "data": {"type": "video", "path": _resolve_path(video), "caption": caption or "", "message_id": mid},
+            "data": {"type": "video", "path": _resolve_path(video), "caption": caption or "", "message_id": mid, **reply_fields},
         })
         return MockMessage(message_id=mid)
 
@@ -102,9 +115,10 @@ class ProxyBot:
         **kwargs,
     ) -> MockMessage:
         mid = self._next_message_id()
+        reply_fields = self._reply_fields(kwargs)
         await self._put({
             "event": "file",
-            "data": {"type": "voice", "path": _resolve_path(voice), "caption": caption or "", "message_id": mid},
+            "data": {"type": "voice", "path": _resolve_path(voice), "caption": caption or "", "message_id": mid, **reply_fields},
         })
         return MockMessage(message_id=mid)
 
@@ -116,9 +130,10 @@ class ProxyBot:
         **kwargs,
     ) -> MockMessage:
         mid = self._next_message_id()
+        reply_fields = self._reply_fields(kwargs)
         await self._put({
             "event": "file",
-            "data": {"type": "audio", "path": _resolve_path(audio), "caption": caption or "", "message_id": mid},
+            "data": {"type": "audio", "path": _resolve_path(audio), "caption": caption or "", "message_id": mid, **reply_fields},
         })
         return MockMessage(message_id=mid)
 
@@ -130,9 +145,10 @@ class ProxyBot:
         **kwargs,
     ) -> MockMessage:
         mid = self._next_message_id()
+        reply_fields = self._reply_fields(kwargs)
         await self._put({
             "event": "file",
-            "data": {"type": "document", "path": _resolve_path(document), "caption": caption or "", "message_id": mid},
+            "data": {"type": "document", "path": _resolve_path(document), "caption": caption or "", "message_id": mid, **reply_fields},
         })
         return MockMessage(message_id=mid)
 

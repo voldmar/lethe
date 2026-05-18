@@ -35,9 +35,19 @@ def clear_telegram_context():
     _target_message_id.set(None)
 
 
+def _reply_fields(reply_to_message_id: int = 0, allow_sending_without_reply: bool = True) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    if reply_to_message_id:
+        fields["reply_to_message_id"] = reply_to_message_id
+        fields["allow_sending_without_reply"] = allow_sending_without_reply
+    return fields
+
+
 async def telegram_send_message_async(
     text: str,
     parse_mode: str = "",
+    reply_to_message_id: int = 0,
+    allow_sending_without_reply: bool = True,
 ) -> str:
     """Send a text message to the current Telegram chat.
     
@@ -47,12 +57,15 @@ async def telegram_send_message_async(
     Args:
         text: Message text to send
         parse_mode: Optional parsing mode - "markdown", "html", or "" for plain text
+        reply_to_message_id: Optional Telegram message id to reply to (0 disables reply threading)
+        allow_sending_without_reply: Allow Telegram to send the message even if the reply target is missing
     
     Returns:
         JSON with success status
     """
     bot = _current_bot.get()
     chat_id = _current_chat_id.get()
+    reply_fields = _reply_fields(reply_to_message_id, allow_sending_without_reply)
     
     if not bot or not chat_id:
         raise RuntimeError("Telegram context not set. This tool can only be used during task processing.")
@@ -69,6 +82,7 @@ async def telegram_send_message_async(
             chat_id=chat_id,
             text=text,
             parse_mode=pm,
+            **reply_fields,
         )
     except Exception as e:
         if pm and "parse entities" in str(e).lower():
@@ -77,6 +91,7 @@ async def telegram_send_message_async(
                 chat_id=chat_id,
                 text=text,
                 parse_mode=None,
+                **reply_fields,
             )
         else:
             raise
@@ -92,6 +107,8 @@ async def telegram_send_file_async(
     file_path_or_url: str,
     caption: str = "",
     as_document: bool = False,
+    reply_to_message_id: int = 0,
+    allow_sending_without_reply: bool = True,
 ) -> str:
     """Send a file or image to the current Telegram chat.
     
@@ -99,6 +116,8 @@ async def telegram_send_file_async(
         file_path_or_url: Local file path or URL to send
         caption: Optional caption for the file
         as_document: If True, send as document even if it's an image
+        reply_to_message_id: Optional Telegram message id to reply to (0 disables reply threading)
+        allow_sending_without_reply: Allow Telegram to send the message even if the reply target is missing
     
     Returns:
         JSON with success status
@@ -107,6 +126,7 @@ async def telegram_send_file_async(
     
     bot = _current_bot.get()
     chat_id = _current_chat_id.get()
+    reply_fields = _reply_fields(reply_to_message_id, allow_sending_without_reply)
     
     if not bot or not chat_id:
         raise RuntimeError("Telegram context not set. This tool can only be used during task processing.")
@@ -141,6 +161,7 @@ async def telegram_send_file_async(
             chat_id=chat_id,
             photo=file_input,
             caption=caption or None,
+            **reply_fields,
         )
         send_type = "photo"
     elif is_gif and not as_document:
@@ -149,6 +170,7 @@ async def telegram_send_file_async(
             chat_id=chat_id,
             animation=file_input,
             caption=caption or None,
+            **reply_fields,
         )
         send_type = "animation"
     elif is_video and not as_document:
@@ -156,6 +178,7 @@ async def telegram_send_file_async(
             chat_id=chat_id,
             video=file_input,
             caption=caption or None,
+            **reply_fields,
         )
         send_type = "video"
     elif is_voice and not as_document:
@@ -164,6 +187,7 @@ async def telegram_send_file_async(
             chat_id=chat_id,
             voice=file_input,
             caption=caption or None,
+            **reply_fields,
         )
         send_type = "voice"
     elif is_audio and not as_document:
@@ -171,6 +195,7 @@ async def telegram_send_file_async(
             chat_id=chat_id,
             audio=file_input,
             caption=caption or None,
+            **reply_fields,
         )
         send_type = "audio"
     else:
@@ -178,6 +203,7 @@ async def telegram_send_file_async(
             chat_id=chat_id,
             document=file_input,
             caption=caption or None,
+            **reply_fields,
         )
         send_type = "document"
     
@@ -201,6 +227,8 @@ def _is_tool(func):
 def telegram_send_message(
     text: str,
     parse_mode: str = "",
+    reply_to_message_id: int = 0,
+    allow_sending_without_reply: bool = True,
 ) -> str:
     """Send an EXTRA message to the user during a long task.
     
@@ -212,6 +240,8 @@ def telegram_send_message(
     Args:
         text: Message text to send
         parse_mode: Optional - "markdown", "html", or "" for plain text
+        reply_to_message_id: Optional Telegram message id to reply to (0 disables reply threading)
+        allow_sending_without_reply: Allow Telegram to send the message even if the reply target is missing
     
     Returns:
         JSON with success status and message_id
@@ -224,6 +254,8 @@ def telegram_send_file(
     file_path_or_url: str,
     caption: str = "",
     as_document: bool = False,
+    reply_to_message_id: int = 0,
+    allow_sending_without_reply: bool = True,
 ) -> str:
     """Send a file or image to the current Telegram chat.
     
@@ -237,6 +269,8 @@ def telegram_send_file(
         file_path_or_url: Local file path (e.g., "/tmp/chart.png") or URL (e.g., "https://example.com/image.jpg")
         caption: Optional caption to display with the file
         as_document: If True, send as document even if it's an image/video (preserves original quality)
+        reply_to_message_id: Optional Telegram message id to reply to (0 disables reply threading)
+        allow_sending_without_reply: Allow Telegram to send the message even if the reply target is missing
     
     Returns:
         JSON with success status and message details

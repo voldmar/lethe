@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -788,9 +789,19 @@ class TestWebSearch:
 class DummyTelegramBot:
     def __init__(self):
         self.calls = []
+        self.sent_messages = []
+        self.sent_documents = []
 
     async def set_message_reaction(self, chat_id, message_id, reaction, **kwargs):
         self.calls.append((chat_id, message_id, reaction))
+
+    async def send_message(self, chat_id, text, parse_mode=None, **kwargs):
+        self.sent_messages.append((chat_id, text, parse_mode, kwargs))
+        return SimpleNamespace(message_id=123)
+
+    async def send_document(self, chat_id, document, caption=None, **kwargs):
+        self.sent_documents.append((chat_id, document, caption, kwargs))
+        return SimpleNamespace(message_id=456)
 
 
 class TestTelegramReactTool:
@@ -900,6 +911,67 @@ class TestTelegramReactTool:
         assert payload["queued"] is True
         assert payload["message_id"] == 77
         assert bot.calls == []
+
+
+class TestTelegramReplyTools:
+    def test_telegram_send_message_schema_includes_reply_args(self):
+        from lethe.tools import function_to_schema
+        from lethe.tools.telegram_tools import telegram_send_message_async
+
+        schema = function_to_schema(telegram_send_message_async)
+        props = schema["parameters"]["properties"]
+        assert props["reply_to_message_id"]["type"] == "integer"
+        assert props["allow_sending_without_reply"]["type"] == "boolean"
+        assert "reply_to_message_id" not in schema["parameters"]["required"]
+
+    @pytest.mark.asyncio
+    async def test_telegram_send_message_forwards_reply_args(self):
+        from lethe.tools.telegram_tools import clear_telegram_context, set_telegram_context, telegram_send_message_async
+
+        bot = DummyTelegramBot()
+        set_telegram_context(bot, 99)
+
+        try:
+            payload = json.loads(
+                await telegram_send_message_async(
+                    "hello",
+                    reply_to_message_id=88,
+                    allow_sending_without_reply=False,
+                )
+            )
+        finally:
+            clear_telegram_context()
+
+        assert payload["message_id"] == 123
+        assert bot.sent_messages[0][3]["reply_to_message_id"] == 88
+        assert bot.sent_messages[0][3]["allow_sending_without_reply"] is False
+
+    @pytest.mark.asyncio
+    async def test_telegram_send_file_forwards_reply_args(self, tmp_path):
+        from lethe.tools.telegram_tools import clear_telegram_context, set_telegram_context, telegram_send_file_async
+
+        file_path = tmp_path / "note.txt"
+        file_path.write_text("hello")
+
+        bot = DummyTelegramBot()
+        set_telegram_context(bot, 99)
+
+        try:
+            payload = json.loads(
+                await telegram_send_file_async(
+                    str(file_path),
+                    caption="note",
+                    as_document=True,
+                    reply_to_message_id=77,
+                    allow_sending_without_reply=True,
+                )
+            )
+        finally:
+            clear_telegram_context()
+
+        assert payload["message_id"] == 456
+        assert bot.sent_documents[0][3]["reply_to_message_id"] == 77
+        assert bot.sent_documents[0][3]["allow_sending_without_reply"] is True
 
 
 # ============================================================================

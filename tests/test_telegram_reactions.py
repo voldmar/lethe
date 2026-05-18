@@ -75,19 +75,35 @@ class TestTelegramReactionHelpers:
 
     def test_build_message_metadata_captures_reply_target(self, tmp_path):
         bot, _ = self._make_bot(tmp_path)
+        reply_target = SimpleNamespace(
+            message_id=88,
+            chat=SimpleNamespace(id=44),
+            date="2026-05-18T12:00:00+0000",
+            from_user=SimpleNamespace(id=7, username="oldmsg", first_name="Old"),
+            text="old context",
+        )
         message = SimpleNamespace(
             message_id=12,
             chat=SimpleNamespace(id=22),
             from_user=SimpleNamespace(username="alice", first_name="Alice"),
-            reply_to_message=SimpleNamespace(message_id=88),
+            reply_to_message=reply_target,
         )
 
         metadata = bot._build_message_metadata(message)
 
         assert metadata["reply_to_message_id"] == 88
         assert metadata["reply_message_id"] == 88
+        assert metadata["reply_to_chat_id"] == 44
+        assert metadata["reply_to_date"] == "2026-05-18T12:00:00+0000"
+        assert metadata["reply_to_text"] == "old context"
+        assert metadata["reply_to_content_type"] == "text"
+        assert metadata["reply_to_from"] == {
+            "id": 7,
+            "username": "oldmsg",
+            "first_name": "Old",
+        }
 
-    def test_ingress_reply_target_metadata_drives_combined_target(self, tmp_path):
+    def test_ingress_reply_target_metadata_is_preserved_without_becoming_target(self, tmp_path):
         bot, _ = self._make_bot(tmp_path)
         message = SimpleNamespace(
             message_id=12,
@@ -102,9 +118,33 @@ class TestTelegramReactionHelpers:
 
         _, combined_metadata = state.get_combined_message()
 
-        assert combined_metadata["target_message_id"] == 88
+        assert "target_message_id" not in combined_metadata
         assert combined_metadata["message_bundle"]["items"][0]["reply_to_message_id"] == 88
         assert combined_metadata["message_bundle"]["items"][0]["reply_message_id"] == 88
+        assert combined_metadata["reply_to_message_id"] == 88
+
+    def test_build_message_metadata_captures_reply_caption(self, tmp_path):
+        bot, _ = self._make_bot(tmp_path)
+        reply_target = SimpleNamespace(
+            message_id=99,
+            chat=SimpleNamespace(id=55),
+            date="2026-05-18T13:00:00+0000",
+            from_user=SimpleNamespace(id=8, username="media", first_name="Media"),
+            caption="captioned file",
+            photo=[SimpleNamespace(file_id="file-1")],
+        )
+        message = SimpleNamespace(
+            message_id=13,
+            chat=SimpleNamespace(id=22),
+            from_user=SimpleNamespace(username="alice", first_name="Alice"),
+            reply_to_message=reply_target,
+        )
+
+        metadata = bot._build_message_metadata(message)
+
+        assert metadata["reply_to_caption"] == "captioned file"
+        assert metadata["reply_to_content_type"] == "photo"
+        assert metadata["reply_to_from"]["username"] == "media"
 
     def test_build_reaction_event_serializes_actor_and_message(self, tmp_path):
         bot, _ = self._make_bot(tmp_path)

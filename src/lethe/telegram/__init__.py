@@ -15,8 +15,7 @@ from lethe.config import Settings, get_settings
 from lethe.conversation import ConversationManager
 from lethe.models import MODEL_CATALOG, get_available_providers, provider_for_model, _PROVIDER_LABELS
 from lethe.reaction_transport import send_message_reaction
-from lethe.telegram.stickers import StickerProcessor
-from lethe.transcription import TranscriptionError, transcribe_audio
+from lethe.telegram_reply_context import extract_reply_context
 
 logger = logging.getLogger(__name__)
 
@@ -306,6 +305,8 @@ class TelegramBot:
             mime_type = getattr(media, "mime_type", None) or ("audio/ogg" if is_voice else None)
 
             try:
+                from lethe.transcription import TranscriptionError, transcribe_audio
+
                 file = await self.bot.get_file(media.file_id)
                 bio = BytesIO()
                 await self.bot.download_file(file.file_path, bio)
@@ -411,6 +412,7 @@ class TelegramBot:
             return self._sticker_processor
         if not self.agent:
             return None
+        from lethe.telegram.stickers import StickerProcessor
         self._sticker_processor = StickerProcessor(
             settings=self.settings,
             bot=self.bot,
@@ -459,9 +461,7 @@ class TelegramBot:
         }
         replied_to = getattr(message, "reply_to_message", None)
         if replied_to is not None:
-            reply_message_id = getattr(replied_to, "message_id", None)
-            metadata["reply_to_message_id"] = reply_message_id
-            metadata["reply_message_id"] = reply_message_id
+            metadata.update(extract_reply_context(replied_to))
         metadata.update(extra)
         return metadata
 
@@ -694,7 +694,14 @@ class TelegramBot:
         allowed = self.settings.allowed_user_ids
         return not allowed or user_id in allowed
 
-    async def send_message(self, chat_id: int, text: str, parse_mode: str = "Markdown"):
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        parse_mode: str = "Markdown",
+        reply_to_message_id: Optional[int] = None,
+        allow_sending_without_reply: bool = False,
+    ):
         """Send a message, splitting on --- for natural pauses."""
         # Skip empty messages (some models return empty responses)
         if not text or not text.strip():
@@ -706,6 +713,13 @@ class TelegramBot:
         # Split on --- for natural message breaks (human-like texting)
         # Each segment becomes a separate message with a pause
         segments = [s.strip() for s in text.split("---") if s.strip()]
+        reply_kwargs = {}
+        if reply_to_message_id:
+            reply_kwargs = {
+                "reply_to_message_id": reply_to_message_id,
+                "allow_sending_without_reply": allow_sending_without_reply,
+            }
+        sent_reply_anchor = False
         
         for i, segment in enumerate(segments):
             # Further split if segment is too long
@@ -725,11 +739,13 @@ class TelegramBot:
                     chunks.append(current)
             
             for chunk in chunks:
+                current_reply_kwargs = reply_kwargs if not sent_reply_anchor else {}
                 try:
-                    await self.bot.send_message(chat_id, chunk, parse_mode=parse_mode)
+                    await self.bot.send_message(chat_id, chunk, parse_mode=parse_mode, **current_reply_kwargs)
                 except Exception:
                     # Fallback to no parsing if markdown fails
-                    await self.bot.send_message(chat_id, chunk, parse_mode=None)
+                    await self.bot.send_message(chat_id, chunk, parse_mode=None, **current_reply_kwargs)
+                sent_reply_anchor = True
                 await asyncio.sleep(0.1)
 
             # Human-like pause: think time + typing time + jitter
@@ -741,15 +757,33 @@ class TelegramBot:
                 pause *= random.uniform(0.8, 1.3)  # ±jitter
                 await asyncio.sleep(pause)
 
-    async def send_photo(self, chat_id: int, photo_path: str, caption: str = ""):
+    async def send_photo(
+        self,
+        chat_id: int,
+        photo_path: str,
+        caption: str = "",
+        reply_to_message_id: Optional[int] = None,
+        allow_sending_without_reply: bool = False,
+    ):
         """Send a photo to chat."""
         from aiogram.types import FSInputFile
+        reply_kwargs = {}
+        if reply_to_message_id:
+            reply_kwargs = {
+                "reply_to_message_id": reply_to_message_id,
+                "allow_sending_without_reply": allow_sending_without_reply,
+            }
         try:
             photo = FSInputFile(photo_path)
-            await self.bot.send_photo(chat_id, photo, caption=caption[:1024] if caption else None)
+            await self.bot.send_photo(chat_id, photo, caption=caption[:1024] if caption else None, **reply_kwargs)
         except Exception as e:
             logger.error(f"Failed to send photo: {e}")
-            await self.send_message(chat_id, f"[Image: {photo_path}]")
+            await self.send_message(
+                chat_id,
+                f"[Image: {photo_path}]",
+                reply_to_message_id=reply_to_message_id,
+                allow_sending_without_reply=allow_sending_without_reply,
+            )
     
     async def react_to_message(self, chat_id: int, message_id: int, emoji: str = "👍"):
         """React to a message with an emoji."""

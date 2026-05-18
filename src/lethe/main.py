@@ -18,6 +18,7 @@ from lethe.agent import Agent
 from lethe.config import get_settings
 from lethe.conversation import ConversationManager
 from lethe.telegram import TelegramBot
+from lethe.telegram_reply_context import wrap_message_with_reply_context
 from lethe.heartbeat import Heartbeat
 from lethe import console as lethe_console
 from lethe.reaction_transport import send_message_reaction
@@ -54,9 +55,13 @@ async def _send_guarded_telegram_final_response(
     chat_id: int,
     response: str,
     mark_user_visible_activity: Callable[[str], None],
+    metadata: Optional[dict] = None,
 ) -> None:
     guard = get_telegram_turn_guard()
     pending_reactions = guard.drain_pending_reactions() if guard else []
+    reply_to_message_id = None
+    if metadata:
+        reply_to_message_id = metadata.get("reply_to_message_id") or metadata.get("target_message_id")
 
     if guard and is_emoji_only_reply(response) and pending_reactions:
         if guard.choose_visible_channel() == "reaction":
@@ -69,7 +74,12 @@ async def _send_guarded_telegram_final_response(
             )
             mark_user_visible_activity("assistant reaction response")
         else:
-            await telegram_bot.send_message(chat_id, response)
+            await telegram_bot.send_message(
+                chat_id,
+                response,
+                reply_to_message_id=reply_to_message_id or 0,
+                allow_sending_without_reply=bool(reply_to_message_id),
+            )
             mark_user_visible_activity("assistant final response")
         return
 
@@ -83,7 +93,12 @@ async def _send_guarded_telegram_final_response(
         mark_user_visible_activity("assistant reaction response")
 
     if response and response.strip():
-        await telegram_bot.send_message(chat_id, response)
+        await telegram_bot.send_message(
+            chat_id,
+            response,
+            reply_to_message_id=reply_to_message_id or 0,
+            allow_sending_without_reply=bool(reply_to_message_id),
+        )
         mark_user_visible_activity("assistant final response")
 
 
@@ -195,9 +210,10 @@ async def run():
         
         # Set telegram context for tools (reactions, sending messages)
         set_telegram_context(telegram_bot.bot, chat_id)
-        target_message_id = metadata.get("target_message_id") or metadata.get("message_id")
-        if target_message_id:
-            set_last_message_id(target_message_id)
+        message_id = metadata.get("message_id")
+        if message_id:
+            set_last_message_id(message_id)
+        reply_to_message_id = metadata.get("reply_to_message_id") or metadata.get("target_message_id")
         start_telegram_turn_guard()
         
         # Start typing indicator
@@ -221,11 +237,17 @@ async def run():
                 """Send image to user."""
                 if interrupt_check():
                     return
-                await telegram_bot.send_photo(chat_id, image_path)
+                await telegram_bot.send_photo(
+                    chat_id,
+                    image_path,
+                    reply_to_message_id=reply_to_message_id,
+                    allow_sending_without_reply=bool(reply_to_message_id),
+                )
                 mark_user_visible_activity("assistant image update")
             
             # Get response from agent
-            response = await agent.chat(message, on_message=on_intermediate, on_image=on_image)
+            turn_message = wrap_message_with_reply_context(message, metadata)
+            response = await agent.chat(turn_message, on_message=on_intermediate, on_image=on_image)
             
             # Check for interrupt
             if interrupt_check():
@@ -239,6 +261,7 @@ async def run():
                 chat_id,
                 response,
                 mark_user_visible_activity,
+                metadata,
             )
             
         except Exception as e:
