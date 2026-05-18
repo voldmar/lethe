@@ -71,7 +71,7 @@ class TestGuardedTelegramFinalization:
 
         assert payload["queued"] is True
         reaction_send.assert_not_awaited()
-        bot.send_message.assert_awaited_once_with(99, "👍")
+        bot.send_message.assert_awaited_once_with(99, "👍", reply_to_message_id=0, allow_sending_without_reply=False)
         marker.assert_called_once_with("assistant final response")
 
     @pytest.mark.asyncio
@@ -94,5 +94,5 @@ class TestGuardedTelegramFinalization:
 
         assert reaction_send.await_count == 2
         assert [call.args[2] for call in reaction_send.await_args_list] == [42, 78]
-        bot.send_message.assert_awaited_once_with(99, "Thanks for the update.")
+        bot.send_message.assert_awaited_once_with(99, "Thanks for the update.", reply_to_message_id=0, allow_sending_without_reply=False)
         assert marker.call_count == 3

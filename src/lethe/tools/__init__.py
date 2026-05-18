@@ -50,6 +50,8 @@ from lethe.tools.browser_agent import (
 # Internal telegram context (not tools - used by main.py)
 from lethe.tools.telegram_tools import (
     set_telegram_context,
+    set_telegram_provenance,
+    clear_telegram_provenance,
     set_last_message_id,
     clear_telegram_context,
 )

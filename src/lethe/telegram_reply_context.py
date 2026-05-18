@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from lethe.telegram_message_map import try_find_sent_message
+
 
 def _reply_from_summary(reply_from: Any) -> dict[str, Any]:
     if not reply_from:
@@ -64,6 +66,11 @@ def extract_reply_context(reply_to_message: Any) -> dict[str, Any]:
     reply_chat_id = getattr(reply_chat, "id", None)
     if reply_chat_id is not None:
         context["reply_to_chat_id"] = reply_chat_id
+
+    if reply_message_id is not None and reply_chat_id is not None:
+        mapped = try_find_sent_message(reply_chat_id, reply_message_id)
+        if mapped:
+            context["reply_to_mapped_message"] = mapped
 
     reply_date = getattr(reply_to_message, "date", None)
     if reply_date is not None:
@@ -136,6 +143,33 @@ def wrap_message_with_reply_context(message: str, metadata: dict[str, Any]) -> s
     reply_to_caption = metadata.get("reply_to_caption")
     if reply_to_caption:
         lines.append(f"- reply_to_caption: {_format_value(reply_to_caption)}")
+
+    mapped = metadata.get("reply_to_mapped_message") or {}
+    if mapped:
+        lines.append("[Telegram mapped reply target]")
+        for key in (
+            "tool",
+            "type",
+            "send_type",
+            "chat_id",
+            "message_id",
+            "reply_to_message_id",
+            "created_at",
+        ):
+            value = mapped.get(key)
+            if value is not None:
+                lines.append(f"- {key}: {_format_value(value)}")
+        provenance = mapped.get("provenance") or {}
+        for key in ("actor_id", "actor_name", "session_id", "turn_id"):
+            value = provenance.get(key)
+            if value is not None:
+                lines.append(f"- provenance.{key}: {_format_value(value)}")
+        artifact = mapped.get("artifact") or {}
+        for key in ("filename", "path"):
+            value = artifact.get(key)
+            if value:
+                lines.append(f"- artifact.{key}: {_format_value(value)}")
+        lines.append("[/Telegram mapped reply target]")
 
     lines.append("[/Telegram reply context]")
     lines.append("")

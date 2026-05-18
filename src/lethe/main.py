@@ -201,7 +201,7 @@ async def run():
     # Message processing callback
     async def process_message(chat_id: int, user_id: int, message: str, metadata: dict, interrupt_check):
         """Process a message from Telegram."""
-        from lethe.tools import set_telegram_context, set_last_message_id, clear_telegram_context
+        from lethe.tools import set_telegram_context, set_telegram_provenance, set_last_message_id, clear_telegram_context
         nonlocal last_user_chat_id
         
         logger.info(f"Processing message from {user_id}: {message[:50]}...")
@@ -398,8 +398,9 @@ async def run():
             logger.warning("run_cortex_turn: no chat_id configured")
             return
         # No rate limiting — subagent results are responses to user-initiated tasks.
-        from lethe.tools import set_telegram_context, clear_telegram_context
+        from lethe.tools import set_telegram_context, set_telegram_provenance, clear_telegram_context
         set_telegram_context(telegram_bot.bot, target_chat_id)
+        set_telegram_provenance(actor_id="cortex", actor_name="cortex")
         try:
             await telegram_bot.start_typing(target_chat_id)
             response = await agent.chat(synthetic_message)
@@ -633,10 +634,11 @@ async def run_api(port: int = 8080):
     # Wire actor system callbacks
     if actor_system:
         async def run_cortex_turn(synthetic_message: str):
-            from lethe.tools import set_telegram_context, clear_telegram_context
+            from lethe.tools import set_telegram_context, set_telegram_provenance, clear_telegram_context
             from lethe.proxy_bot import ProxyBot
             proxy = ProxyBot(api_module._proactive_queue)
             set_telegram_context(proxy, 0)
+            set_telegram_provenance(actor_id="cortex", actor_name="cortex")
             try:
                 response = await agent.chat(synthetic_message)
                 if response and response.strip():

@@ -78,6 +78,7 @@ def _workspace_root() -> Path:
     if _settings and getattr(_settings, "workspace_dir", None):
         return Path(_settings.workspace_dir).resolve()
     from lethe.paths import workspace_dir
+
     return workspace_dir().resolve()
 
 
@@ -157,11 +158,7 @@ async def _unregister_session(session_id: str):
 async def _session_accepts_events(chat_id: int, session_id: str) -> bool:
     async with _api_session_lock:
         session = _api_sessions.get(session_id)
-        return bool(
-            session
-            and not session.closed
-            and _chat_sessions.get(chat_id) == session_id
-        )
+        return bool(session and not session.closed and _chat_sessions.get(chat_id) == session_id)
 
 
 async def _get_session_queue(session_id: str) -> Optional[asyncio.Queue]:
@@ -189,7 +186,12 @@ async def _process_chat_message(
 
     from lethe.proxy_bot import ProxyBot
     from lethe.telegram_reply_context import wrap_message_with_reply_context
-    from lethe.tools import clear_telegram_context, set_last_message_id, set_telegram_context
+    from lethe.tools import (
+        clear_telegram_context,
+        set_last_message_id,
+        set_telegram_context,
+        set_telegram_provenance,
+    )
 
     proxy = ProxyBot(event_queue)
 
@@ -200,6 +202,7 @@ async def _process_chat_message(
         return True
 
     set_telegram_context(proxy, chat_id)
+    set_telegram_provenance(actor_id="cortex", actor_name="cortex", session_id=session_id)
     message_id = metadata.get("message_id")
     if message_id:
         set_last_message_id(message_id)
@@ -391,7 +394,9 @@ async def model(request: Request) -> JSONResponse:
             current_auth = "sub"
         elif force is False:
             current_auth = "API"
-        elif getattr(_agent.llm, "_oauth", None) and config.provider == getattr(_agent.llm, "_oauth_provider", ""):
+        elif getattr(_agent.llm, "_oauth", None) and config.provider == getattr(
+            _agent.llm, "_oauth_provider", ""
+        ):
             current_auth = "sub"
         else:
             current_auth = "API"
