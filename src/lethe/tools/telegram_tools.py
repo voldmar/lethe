@@ -112,15 +112,6 @@ def _telegram_send_result(
     return json.dumps(payload)
 
 
-def _reply_fields(
-    reply_to_message_id: int = 0, allow_sending_without_reply: bool = True
-) -> dict[str, Any]:
-    fields: dict[str, Any] = {}
-    if reply_to_message_id:
-        fields["reply_to_message_id"] = reply_to_message_id
-        fields["allow_sending_without_reply"] = allow_sending_without_reply
-    return fields
-
 
 async def telegram_send_message_async(
     text: str,

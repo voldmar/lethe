@@ -63,3 +63,24 @@ def test_format_reply_context_renders_mapped_target_and_provenance():
     assert "- tool: telegram_send_file" in rendered
     assert "- artifact.path: /tmp/artifact.txt" in rendered
     assert "- provenance.session_id: s1" in rendered
+
+
+def test_wrap_reply_context_preserves_multimodal_message_parts():
+    metadata = {
+        "message_id": 889,
+        "reply_to_message_id": 777,
+        "reply_to_chat_id": 118,
+        "reply_to_content_type": "photo",
+    }
+    parts = [
+        {"type": "text", "text": "caption text"},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}},
+    ]
+
+    wrapped = wrap_message_with_reply_context(parts, metadata)
+
+    assert isinstance(wrapped, list)
+    assert wrapped[0]["type"] == "text"
+    assert "[Telegram reply context]" in wrapped[0]["text"]
+    assert "User instruction:" in wrapped[0]["text"]
+    assert wrapped[1:] == parts

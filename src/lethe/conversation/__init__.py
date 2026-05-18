@@ -22,7 +22,7 @@ DEFAULT_DEBOUNCE_SECONDS = 5.0
 @dataclass
 class PendingMessage:
     """A message waiting to be processed."""
-    content: str
+    content: Any
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -167,7 +167,7 @@ class ConversationManager:
         self,
         chat_id: int,
         user_id: int,
-        content: str,
+        content: Any,
         metadata: Optional[dict] = None,
         process_callback: Optional[Callable] = None,
     ) -> bool:

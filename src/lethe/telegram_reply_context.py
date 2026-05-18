@@ -101,11 +101,8 @@ def _format_value(value: Any) -> str:
     return str(value)
 
 
-def wrap_message_with_reply_context(message: str, metadata: dict[str, Any]) -> str:
+def _render_reply_context(metadata: dict[str, Any]) -> str:
     reply_to_message_id = metadata.get("reply_to_message_id")
-    if not reply_to_message_id:
-        return message
-
     lines = ["[Telegram reply context]"]
     current_message_id = metadata.get("message_id")
     if current_message_id:
@@ -172,7 +169,19 @@ def wrap_message_with_reply_context(message: str, metadata: dict[str, Any]) -> s
         lines.append("[/Telegram mapped reply target]")
 
     lines.append("[/Telegram reply context]")
-    lines.append("")
-    lines.append("User instruction:")
-    lines.append(message)
     return "\n".join(lines)
+
+
+def wrap_message_with_reply_context(message: Any, metadata: dict[str, Any]) -> Any:
+    reply_to_message_id = metadata.get("reply_to_message_id")
+    if not reply_to_message_id:
+        return message
+
+    rendered_context = _render_reply_context(metadata)
+    if isinstance(message, list):
+        return [
+            {"type": "text", "text": rendered_context + "\n\nUser instruction:"},
+            *message,
+        ]
+
+    return rendered_context + f"\n\nUser instruction:\n{message}"
