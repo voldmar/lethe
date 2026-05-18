@@ -40,7 +40,7 @@ class TestGuardedTelegramFinalization:
         set_last_message_id(42)
 
         try:
-            payload = json.loads(await telegram_react_async("🔥", message_id=77))
+            payload = json.loads(await telegram_react_async("🔥"))
             await _send_guarded_telegram_final_response(bot, 99, "👍", marker)
         finally:
             clear_telegram_context()
@@ -48,6 +48,7 @@ class TestGuardedTelegramFinalization:
 
         assert payload["queued"] is True
         reaction_send.assert_awaited_once()
+        assert reaction_send.await_args.args[2] == 42
         bot.send_message.assert_not_awaited()
         marker.assert_called_once_with("assistant reaction response")
 
@@ -84,7 +85,7 @@ class TestGuardedTelegramFinalization:
         set_last_message_id(42)
 
         try:
-            await telegram_react_async("🔥", message_id=77)
+            await telegram_react_async("🔥")
             await telegram_react_async("👍", message_id=78)
             await _send_guarded_telegram_final_response(bot, 99, "Thanks for the update.", marker)
         finally:
@@ -92,5 +93,6 @@ class TestGuardedTelegramFinalization:
             clear_telegram_turn_guard()
 
         assert reaction_send.await_count == 2
+        assert [call.args[2] for call in reaction_send.await_args_list] == [42, 78]
         bot.send_message.assert_awaited_once_with(99, "Thanks for the update.")
         assert marker.call_count == 3

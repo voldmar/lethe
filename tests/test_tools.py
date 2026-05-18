@@ -838,7 +838,7 @@ class TestTelegramReactTool:
         assert getattr(bot.calls[0][2][0], "emoji", None) == "🔥"
 
     @pytest.mark.asyncio
-    async def test_telegram_react_falls_back_to_last_message_id(self):
+    async def test_telegram_react_uses_seeded_target_message_id(self):
         from lethe.tools.telegram_tools import (
             clear_telegram_context,
             set_last_message_id,
@@ -857,6 +857,23 @@ class TestTelegramReactTool:
 
         assert payload["message_id"] == 42
         assert bot.calls[0][1] == 42
+
+    @pytest.mark.asyncio
+    async def test_telegram_react_requires_seeded_target_when_message_id_omitted(self):
+        from lethe.tools.telegram_tools import (
+            clear_telegram_context,
+            set_telegram_context,
+            telegram_react_async,
+        )
+
+        bot = DummyTelegramBot()
+        set_telegram_context(bot, 99)
+
+        try:
+            with pytest.raises(RuntimeError):
+                await telegram_react_async("👍")
+        finally:
+            clear_telegram_context()
 
     @pytest.mark.asyncio
     async def test_telegram_react_queues_when_guard_active(self):

@@ -7,6 +7,7 @@ import pytest
 
 pytest.importorskip("aiogram")
 
+from lethe.conversation import ConversationState
 from lethe.telegram import TelegramBot
 
 
@@ -72,6 +73,39 @@ class TestTelegramReactionHelpers:
         assert metadata["message_id"] == 11
         assert metadata["is_photo"] is True
 
+    def test_build_message_metadata_captures_reply_target(self, tmp_path):
+        bot, _ = self._make_bot(tmp_path)
+        message = SimpleNamespace(
+            message_id=12,
+            chat=SimpleNamespace(id=22),
+            from_user=SimpleNamespace(username="alice", first_name="Alice"),
+            reply_to_message=SimpleNamespace(message_id=88),
+        )
+
+        metadata = bot._build_message_metadata(message)
+
+        assert metadata["reply_to_message_id"] == 88
+        assert metadata["reply_message_id"] == 88
+
+    def test_ingress_reply_target_metadata_drives_combined_target(self, tmp_path):
+        bot, _ = self._make_bot(tmp_path)
+        message = SimpleNamespace(
+            message_id=12,
+            chat=SimpleNamespace(id=22),
+            from_user=SimpleNamespace(username="alice", first_name="Alice"),
+            reply_to_message=SimpleNamespace(message_id=88),
+        )
+
+        metadata = bot._build_message_metadata(message)
+        state = ConversationState(chat_id=22, user_id=11)
+        state.add_message("hello", metadata)
+
+        _, combined_metadata = state.get_combined_message()
+
+        assert combined_metadata["target_message_id"] == 88
+        assert combined_metadata["message_bundle"]["items"][0]["reply_to_message_id"] == 88
+        assert combined_metadata["message_bundle"]["items"][0]["reply_message_id"] == 88
+
     def test_build_reaction_event_serializes_actor_and_message(self, tmp_path):
         bot, _ = self._make_bot(tmp_path)
 
@@ -80,6 +114,10 @@ class TestTelegramReactionHelpers:
         assert content.startswith("[Telegram reaction added:")
         assert "message 42" in content
         assert metadata["message_id"] == 42
+        assert metadata["chat_id"] == 99
+        assert metadata["reaction_action"] == "added"
+        assert metadata["reaction_user_id"] == 11
+        assert metadata["reaction_old"] == []
         assert metadata["reaction_new"] == ["👍"]
 
     @pytest.mark.asyncio
@@ -94,6 +132,10 @@ class TestTelegramReactionHelpers:
         assert kwargs["user_id"] == 11
         assert "Telegram reaction" in kwargs["content"]
         assert kwargs["metadata"]["message_id"] == 42
+        assert kwargs["metadata"]["chat_id"] == 99
+        assert kwargs["metadata"]["reaction_action"] == "added"
+        assert kwargs["metadata"]["reaction_user_id"] == 11
+        assert kwargs["metadata"]["reaction_old"] == []
         assert kwargs["metadata"]["reaction_new"] == ["👍"]
 
     @pytest.mark.asyncio

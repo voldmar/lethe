@@ -199,8 +199,9 @@ async def _process_chat_message(
         return True
 
     set_telegram_context(proxy, chat_id)
-    if metadata.get("message_id"):
-        set_last_message_id(metadata["message_id"])
+    target_message_id = metadata.get("target_message_id") or metadata.get("message_id")
+    if target_message_id:
+        set_last_message_id(target_message_id)
 
     if _agent:
         removed = _agent.llm.clear_idle_markers()

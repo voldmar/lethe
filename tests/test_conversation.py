@@ -52,39 +52,92 @@ class TestConversationState:
 
     def test_get_combined_message_single(self):
         state = ConversationState(chat_id=123, user_id=456)
-        state.add_message("hello", {"user": "test"})
-        
+        state.add_message("hello", {"user": "test", "message_id": 7})
+
         content, metadata = state.get_combined_message()
-        
+
         assert content == "hello"
-        assert metadata == {"user": "test"}
+        assert metadata["user"] == "test"
+        assert metadata["message_id"] == 7
+        assert metadata["target_message_id"] == 7
+        assert len(metadata["message_bundle"]["items"]) == 1
+        item = metadata["message_bundle"]["items"][0]
+        assert item["index"] == 0
+        assert item["content"] == "hello"
+        assert item["message_id"] == 7
+        assert item["metadata"] == {"user": "test", "message_id": 7}
+        assert isinstance(item["created_at"], str)
         assert len(state.pending_messages) == 0  # Cleared
 
-    def test_get_combined_message_multiple(self):
-        state = ConversationState(chat_id=123, user_id=456)
-        state.add_message("first", {"a": 1})
-        state.add_message("second", {"b": 2})
-        state.add_message("third", {"a": 3})  # Overrides a
-        
-        content, metadata = state.get_combined_message()
-        
-        assert "first" in content
-        assert "second" in content
-        assert "third" in content
-        assert metadata == {"a": 3, "b": 2}  # Merged, later overrides
-        assert len(state.pending_messages) == 0
-
-    def test_get_combined_message_multiple_message_id_last_wins(self):
+    def test_get_combined_message_multiple_preserves_order_and_bundle(self):
         state = ConversationState(chat_id=123, user_id=456)
         state.add_message("first", {"message_id": 1, "a": 1})
+        state.add_message("second", {"message_id": 2, "b": 2})
+        state.add_message("third", {"message_id": 3, "a": 3})
+
+        content, metadata = state.get_combined_message()
+
+        assert content == "first\n\nsecond\n\nthird"
+        assert metadata["a"] == 3
+        assert metadata["b"] == 2
+        assert metadata["message_id"] == 3
+        assert metadata["target_message_id"] == 3
+        items = metadata["message_bundle"]["items"]
+        assert [item["content"] for item in items] == ["first", "second", "third"]
+        assert [item["message_id"] for item in items] == [1, 2, 3]
+        assert [item["index"] for item in items] == [0, 1, 2]
+        assert len(state.pending_messages) == 0
+
+    def test_get_combined_message_multiple_explicit_target_wins(self):
+        state = ConversationState(chat_id=123, user_id=456)
+        state.add_message("first", {"message_id": 1, "a": 1})
+        state.add_message("second", {"message_id": 2, "target_message_id": 1, "b": 2})
+
+        content, metadata = state.get_combined_message()
+
+        assert content == "first\n\nsecond"
+        assert metadata["message_id"] == 2
+        assert metadata["target_message_id"] == 1
+        assert metadata["a"] == 1
+        assert metadata["b"] == 2
+        items = metadata["message_bundle"]["items"]
+        assert items[1]["message_id"] == 2
+        assert items[1]["target_message_id"] == 1
+
+    def test_get_combined_message_explicit_target_beats_latest_message_id(self):
+        state = ConversationState(chat_id=123, user_id=456)
+        state.add_message("first", {"message_id": 1, "target_message_id": 99})
         state.add_message("second", {"message_id": 2, "b": 2})
 
         content, metadata = state.get_combined_message()
 
         assert content == "first\n\nsecond"
         assert metadata["message_id"] == 2
-        assert metadata["a"] == 1
+        assert metadata["target_message_id"] == 99
         assert metadata["b"] == 2
+
+    @pytest.mark.asyncio
+    async def test_process_loop_receives_bundle_metadata_sideband(self):
+        manager = ConversationManager(debounce_seconds=0)
+        state = manager.get_or_create_state(123, 456)
+        state.add_message("first", {"message_id": 1})
+        state.add_message("second", {"message_id": 2, "target_message_id": 1})
+
+        seen = []
+
+        async def process_callback(chat_id, user_id, message, metadata, interrupt_check):
+            seen.append((chat_id, user_id, message, metadata))
+            assert isinstance(message, str)
+
+        await manager._process_loop(state, process_callback)
+
+        assert len(seen) == 1
+        chat_id, user_id, message, metadata = seen[0]
+        assert chat_id == 123
+        assert user_id == 456
+        assert message == "first\n\nsecond"
+        assert metadata["target_message_id"] == 1
+        assert [item["message_id"] for item in metadata["message_bundle"]["items"]] == [1, 2]
 
     def test_get_combined_message_empty(self):
         state = ConversationState(chat_id=123, user_id=456)
@@ -222,6 +275,38 @@ class TestConversationManagerInterrupt:
         # First should be interrupted, second should complete
         assert "start:first_msg" in processed
         assert "interrupted" in processed
+
+    @pytest.mark.asyncio
+    async def test_interrupt_rebatch_preserves_bundle_metadata(self):
+        manager = ConversationManager(debounce_seconds=0.2)
+        first_started = asyncio.Event()
+        second_started = asyncio.Event()
+        calls: list[tuple[str, dict]] = []
+
+        async def process_callback(chat_id, user_id, message, metadata, interrupt_check):
+            calls.append((message, metadata))
+            if message == "first":
+                first_started.set()
+                for _ in range(50):
+                    await asyncio.sleep(0.02)
+                    if interrupt_check():
+                        return
+            else:
+                assert message == "second\n\nthird"
+                assert metadata["target_message_id"] == 2
+                assert [item["message_id"] for item in metadata["message_bundle"]["items"]] == [2, 3]
+                assert [item["content"] for item in metadata["message_bundle"]["items"]] == ["second", "third"]
+                second_started.set()
+
+        await manager.add_message(123, 456, "first", {"message_id": 1}, process_callback=process_callback)
+        await asyncio.wait_for(first_started.wait(), timeout=1)
+
+        await manager.add_message(123, 456, "second", {"message_id": 2}, process_callback=process_callback)
+        await manager.add_message(123, 456, "third", {"message_id": 3, "target_message_id": 2}, process_callback=process_callback)
+
+        await asyncio.wait_for(second_started.wait(), timeout=1)
+        assert any(message == "first" for message, _ in calls)
+        assert any(message == "second\n\nthird" for message, _ in calls)
 
     @pytest.mark.asyncio
     async def test_cancel_stops_processing(self):

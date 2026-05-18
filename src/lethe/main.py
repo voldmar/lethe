@@ -195,8 +195,9 @@ async def run():
         
         # Set telegram context for tools (reactions, sending messages)
         set_telegram_context(telegram_bot.bot, chat_id)
-        if metadata.get("message_id"):
-            set_last_message_id(metadata["message_id"])
+        target_message_id = metadata.get("target_message_id") or metadata.get("message_id")
+        if target_message_id:
+            set_last_message_id(target_message_id)
         start_telegram_turn_guard()
         
         # Start typing indicator

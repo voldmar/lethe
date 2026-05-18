@@ -32,6 +32,7 @@ def clear_telegram_context():
     """Clear the Telegram context after task completion."""
     _current_bot.set(None)
     _current_chat_id.set(None)
+    _target_message_id.set(None)
 
 
 async def telegram_send_message_async(
@@ -243,13 +244,13 @@ def telegram_send_file(
     raise Exception("Client-side execution required")
 
 
-# Context variable for last message (for reactions)
-_last_message_id: ContextVar[Optional[int]] = ContextVar('last_message_id', default=None)
+# Context variable for the selected reaction target (seeded by runtime)
+_target_message_id: ContextVar[Optional[int]] = ContextVar('target_message_id', default=None)
 
 
 def set_last_message_id(message_id: int):
-    """Set the last message ID for reaction support."""
-    _last_message_id.set(message_id)
+    """Seed the selected target message ID for reaction support."""
+    _target_message_id.set(message_id)
 
 
 async def telegram_react_async(emoji: str = "👍", message_id: int = 0) -> str:
@@ -258,14 +259,14 @@ async def telegram_react_async(emoji: str = "👍", message_id: int = 0) -> str:
     Args:
         emoji: Emoji to react with (e.g., "👍", "❤️", "😂", "🔥", "👀")
         message_id: Optional message ID to react to. Use 0 to fall back to the
-            last tracked inbound message.
+            runtime-seeded target message.
     
     Returns:
         JSON with success status
     """
     bot = _current_bot.get()
     chat_id = _current_chat_id.get()
-    target_message_id = message_id or _last_message_id.get()
+    target_message_id = message_id or _target_message_id.get()
     
     if not bot or not chat_id or not target_message_id:
         raise RuntimeError("Telegram context not set or no message to react to.")
@@ -298,7 +299,7 @@ def telegram_react(emoji: str = "👍", message_id: int = 0) -> str:
     Args:
         emoji: Emoji to react with
         message_id: Optional message ID to react to. Use 0 to fall back to the
-            last tracked inbound message.
+            runtime-seeded target message.
     
     Returns:
         JSON with success status

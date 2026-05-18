@@ -66,7 +66,57 @@ class ConversationState:
         
         return interrupted_processing, interrupted_debounce
     
-    def get_combined_message(self) -> tuple[str, dict]:
+    @staticmethod
+    def _message_id(value: Any) -> Optional[int]:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int) and value > 0:
+            return value
+        return None
+
+    def _build_bundle_item(self, msg: PendingMessage, index: int) -> dict[str, Any]:
+        metadata = dict(msg.metadata)
+        item: dict[str, Any] = {
+            "index": index,
+            "content": msg.content,
+            "created_at": msg.created_at.isoformat(),
+            "metadata": metadata,
+        }
+
+        for key in (
+            "message_id",
+            "chat_id",
+            "user_id",
+            "target_message_id",
+            "reply_to_message_id",
+            "reply_message_id",
+        ):
+            value = self._message_id(metadata.get(key))
+            if value is not None:
+                item[key] = value
+
+        return item
+
+    def _resolve_target_message_id(self, bundle_items: list[dict[str, Any]]) -> Optional[int]:
+        for key in (
+            "target_message_id",
+            "reply_to_message_id",
+            "reply_message_id",
+        ):
+            for item in reversed(bundle_items):
+                metadata = item.get("metadata", {})
+                message_id = self._message_id(metadata.get(key))
+                if message_id is not None:
+                    return message_id
+
+        for item in reversed(bundle_items):
+            metadata = item.get("metadata", {})
+            message_id = self._message_id(metadata.get("message_id"))
+            if message_id is not None:
+                return message_id
+        return None
+
+    def get_combined_message(self) -> tuple[str, dict[str, Any]]:
         """Get all pending messages combined into one, clearing the pending list.
         
         Returns:
@@ -74,22 +124,24 @@ class ConversationState:
         """
         if not self.pending_messages:
             return "", {}
-        
-        if len(self.pending_messages) == 1:
-            msg = self.pending_messages.pop(0)
-            return msg.content, msg.metadata
-        
-        # Multiple messages - combine them
-        contents = []
-        merged_metadata = {}
-        
+
+        bundle_items = [
+            self._build_bundle_item(msg, index)
+            for index, msg in enumerate(self.pending_messages)
+        ]
+        contents = [item["content"] for item in bundle_items]
+        merged_metadata: dict[str, Any] = {}
+
         for msg in self.pending_messages:
-            contents.append(msg.content)
-            # Merge metadata, later messages override earlier
-            merged_metadata.update(msg.metadata)
-        
+            merged_metadata.update(dict(msg.metadata))
+
         self.pending_messages.clear()
-        
+
+        merged_metadata["message_bundle"] = {"items": bundle_items}
+        target_message_id = self._resolve_target_message_id(bundle_items)
+        if target_message_id is not None:
+            merged_metadata["target_message_id"] = target_message_id
+
         # Format combined messages - simple newline separation for user messages
         combined = "\n\n".join(contents)
         return combined, merged_metadata

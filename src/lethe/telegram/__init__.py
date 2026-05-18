@@ -457,6 +457,11 @@ class TelegramBot:
             "first_name": message.from_user.first_name if message.from_user else None,
             "message_id": message.message_id,
         }
+        replied_to = getattr(message, "reply_to_message", None)
+        if replied_to is not None:
+            reply_message_id = getattr(replied_to, "message_id", None)
+            metadata["reply_to_message_id"] = reply_message_id
+            metadata["reply_message_id"] = reply_message_id
         metadata.update(extra)
         return metadata
 
