@@ -99,6 +99,25 @@ CONVERSATION_HEADER = load_prompt_template(
     fallback="**From past conversations:**",
 )
 
+
+def _text_for_recall(message: Any) -> str:
+    """Extract a safe text query from a user turn that may be multimodal."""
+    if isinstance(message, list):
+        text_parts: list[str] = []
+        has_image = False
+        for part in message:
+            if isinstance(part, dict) and part.get("type") == "text":
+                text = str(part.get("text", "")).strip()
+                if text:
+                    text_parts.append(text)
+            elif isinstance(part, dict) and part.get("type") == "image_url":
+                has_image = True
+        if text_parts:
+            return " ".join(text_parts)
+        return "(image)" if has_image else ""
+    return str(message)
+
+
 class Hippocampus:
     """Pattern completion memory retrieval with LLM-guided search.
     
@@ -179,11 +198,13 @@ class Hippocampus:
         Returns:
             Formatted (and optionally summarized) memory recall string
         """
+        recall_message = _text_for_recall(message)
+
         # Fire-and-forget salience tagging (runs concurrently, doesn't block recall)
         salience_task: Optional[asyncio.Task] = None
         if self.salience_classifier:
             salience_task = asyncio.create_task(
-                self._tag_salience(message),
+                self._tag_salience(recall_message),
                 name="salience-tag",
             )
 
@@ -193,7 +214,7 @@ class Hippocampus:
             self._stats["skips"] += 1
             self._stats["last_reason"] = "disabled"
             self._stats["last_call_at"] = call_started.isoformat()
-            self._stats["last_message"] = str(message)[:300]
+            self._stats["last_message"] = recall_message[:300]
             self._trace.append(
                 {
                     "at": call_started.isoformat(),
@@ -209,10 +230,10 @@ class Hippocampus:
         call_started = datetime.now(timezone.utc)
         self._stats["calls"] += 1
         self._stats["last_call_at"] = call_started.isoformat()
-        self._stats["last_message"] = str(message)[:300]
+        self._stats["last_message"] = recall_message[:300]
         
         # Step 1: Ask LLM if we should recall and get optimized query
-        analysis = await self._analyze_for_recall(message, recent_messages)
+        analysis = await self._analyze_for_recall(recall_message, recent_messages)
         
         if not analysis or not analysis.get("should_recall"):
             reason = analysis.get("reason") if analysis else "analysis failed"
@@ -378,12 +399,7 @@ class Hippocampus:
         context_lines = []
         for msg in recent_messages[-5:]:
             role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                content = " ".join(
-                    part.get("text", "") for part in content 
-                    if isinstance(part, dict) and part.get("type") == "text"
-                )
+            content = _text_for_recall(msg.get("content", ""))
             # Truncate long messages
             if len(content) > 200:
                 content = content[:200] + "..."
@@ -405,14 +421,7 @@ class Hippocampus:
             for msg in recent_messages[-5:]:
                 if msg.get("role") != "user":
                     continue
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    content = " ".join(
-                        part.get("text", "")
-                        for part in content
-                        if isinstance(part, dict) and part.get("type") == "text"
-                    )
-                content = str(content).strip()
+                content = _text_for_recall(msg.get("content", "")).strip()
                 if content:
                     parts.append(content)
 
@@ -842,13 +851,7 @@ class Hippocampus:
         if recent_messages:
             for msg in recent_messages[-5:]:
                 role = msg.get("role", "?")
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    content = " ".join(
-                        p.get("text", "") for p in content
-                        if isinstance(p, dict) and p.get("type") == "text"
-                    )
-                content = str(content)[:300]
+                content = _text_for_recall(msg.get("content", ""))[:300]
                 parts.append(f"{role}: {content}")
 
         if not parts:

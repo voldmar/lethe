@@ -603,7 +603,7 @@ class Agent:
 
     async def chat(
         self,
-        message: str,
+        message: Any,
         on_message: Optional[Callable[[str], Any]] = None,
         on_image: Optional[Callable[[str], Any]] = None,
         use_hippocampus: bool = True,
@@ -618,7 +618,7 @@ class Agent:
 
     async def _chat_locked(
         self,
-        message: str,
+        message: Any,
         on_message: Optional[Callable[[str], Any]] = None,
         on_image: Optional[Callable[[str], Any]] = None,
         use_hippocampus: bool = True,
@@ -646,11 +646,15 @@ class Agent:
         # Store user message in history (clean, without inbox or recall prepended)
         self.memory.messages.add("user", message)
 
-        # Recall relevant memories (unless disabled)
+        # Recall relevant memories (unless disabled). Hippocampus recall is text-only;
+        # multimodal user turns still go to the chat model unchanged below.
         recall_context = None
         if use_hippocampus:
             recent = self.memory.messages.get_recent(10)
-            recall_context = await self.hippocampus.recall(message, recent)
+            try:
+                recall_context = await self.hippocampus.recall(message, recent)
+            except Exception as exc:
+                logger.warning("Hippocampus recall failed for user turn: %s", exc)
         
         # Inject transient system context for this turn (quota + recall + actor inbox).
         transient_parts = []

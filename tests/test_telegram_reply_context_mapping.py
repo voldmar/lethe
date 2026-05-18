@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from lethe import telegram_reply_context
+from lethe.memory.hippocampus import _text_for_recall
 from lethe.telegram_reply_context import extract_reply_context, wrap_message_with_reply_context
 
 
@@ -84,3 +85,34 @@ def test_wrap_reply_context_preserves_multimodal_message_parts():
     assert "[Telegram reply context]" in wrapped[0]["text"]
     assert "User instruction:" in wrapped[0]["text"]
     assert wrapped[1:] == parts
+
+
+def test_text_for_recall_handles_image_only_multimodal_turn():
+    parts = [
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}},
+    ]
+
+    assert _text_for_recall(parts) == "(image)"
+
+
+def test_text_for_recall_keeps_caption_from_multimodal_turn():
+    parts = [
+        {"type": "text", "text": "що на цьому?"},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}},
+    ]
+
+    assert _text_for_recall(parts) == "що на цьому?"
+
+
+def test_text_for_recall_preserves_image_marker_in_recent_context_helpers(tmp_path):
+    from lethe.memory.hippocampus import Hippocampus
+
+    h = Hippocampus(None, enabled=False)
+    recent = [
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}}]},
+        {"role": "assistant", "content": "seen"},
+    ]
+
+    assert "user: (image)" in h._format_context(recent)
+    assert "(image)" in h._build_query("now text", recent)
+    assert "user: (image)" in h._build_current_context(recent)
