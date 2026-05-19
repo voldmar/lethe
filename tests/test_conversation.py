@@ -139,6 +139,37 @@ class TestConversationState:
         assert metadata["target_message_id"] == 1
         assert [item["message_id"] for item in metadata["message_bundle"]["items"]] == [1, 2]
 
+
+    def test_get_combined_message_single_multimodal_preserves_payload(self):
+        state = ConversationState(chat_id=123, user_id=456)
+        image_content = [
+            {"type": "text", "text": "caption"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}},
+        ]
+
+        state.add_message(image_content, {"message_id": 10})
+        content, metadata = state.get_combined_message()
+
+        assert content == image_content
+        assert metadata["message_bundle"]["items"][0]["content"] == image_content
+
+    def test_get_combined_message_mixed_multimodal_preserves_image_for_provider(self):
+        state = ConversationState(chat_id=123, user_id=456)
+        image_content = [
+            {"type": "text", "text": "caption"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}},
+        ]
+
+        state.add_message("before", {"message_id": 10})
+        state.add_message(image_content, {"message_id": 11})
+        content, metadata = state.get_combined_message()
+
+        assert isinstance(content, list)
+        assert content[0] == {"type": "text", "text": "before"}
+        assert content[1] == {"type": "text", "text": "\n\n"}
+        assert content[2:] == image_content
+        assert metadata["message_bundle"]["items"][1]["content"] == image_content
+
     def test_get_combined_message_empty(self):
         state = ConversationState(chat_id=123, user_id=456)
         

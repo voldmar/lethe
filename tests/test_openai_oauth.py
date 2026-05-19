@@ -324,3 +324,28 @@ def test_context_build_messages_preserves_large_multimodal_image_payload(monkeyp
     assert latest_user["content"][0]["type"] == "text"  # timestamp
     assert latest_user["content"][2]["type"] == "image_url"
     assert latest_user["content"][2]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+def test_normalize_messages_converts_telegram_photo_to_responses_image_input():
+    client = OpenAIOAuth.__new__(OpenAIOAuth)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "що на цьому?"},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}},
+            ],
+        }
+    ]
+
+    normalized = client._normalize_messages(messages)
+
+    assert normalized == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "що на цьому?"},
+                {"type": "input_image", "image_url": "data:image/jpeg;base64,abc"},
+            ],
+        }
+    ]

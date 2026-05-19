@@ -105,7 +105,29 @@ class ConversationState:
                 return message_id
         return None
 
-    def get_combined_message(self) -> tuple[str, dict[str, Any]]:
+    @staticmethod
+    def _as_multimodal_parts(content: Any) -> list[dict[str, Any]]:
+        if isinstance(content, list):
+            return [part for part in content if isinstance(part, dict)]
+        return [{"type": "text", "text": str(content)}]
+
+    @classmethod
+    def _combine_contents(cls, contents: list[Any]) -> Any:
+        """Combine pending Telegram messages without flattening multimodal payloads."""
+        if not contents:
+            return ""
+        if len(contents) == 1:
+            return contents[0]
+        if any(isinstance(content, list) for content in contents):
+            parts: list[dict[str, Any]] = []
+            for index, content in enumerate(contents):
+                if index > 0:
+                    parts.append({"type": "text", "text": "\n\n"})
+                parts.extend(cls._as_multimodal_parts(content))
+            return parts
+        return "\n\n".join(str(content) for content in contents)
+
+    def get_combined_message(self) -> tuple[Any, dict[str, Any]]:
         """Get all pending messages combined into one, clearing the pending list.
         
         Returns:
@@ -131,8 +153,7 @@ class ConversationState:
         if target_message_id is not None:
             merged_metadata["target_message_id"] = target_message_id
 
-        # Format combined messages - simple newline separation for user messages
-        combined = "\n\n".join(contents)
+        combined = self._combine_contents(contents)
         return combined, merged_metadata
     
     def check_interrupt(self) -> bool:
