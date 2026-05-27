@@ -1262,7 +1262,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_turn_preserves_paired_tool_calls_and_responses() {
+    fn prepare_turn_flattens_historical_tool_turns_into_plain_messages() {
         let tmp = tempdir().unwrap();
         let settings = settings(tmp.path());
         let memory = MemoryStore::from_settings(&settings).unwrap();
@@ -1313,25 +1313,20 @@ mod tests {
         )
         .unwrap();
 
-        // 2 system (stable + volatile) + user + assistant_with_tool_calls
-        // + tool_results + assistant + new user = 7.
-        assert_eq!(turn.messages.len(), 7);
-        let call_msg = turn
-            .messages
-            .iter()
-            .find(|m| !m.tool_calls.is_empty())
-            .expect("assistant with tool_calls");
-        assert_eq!(call_msg.tool_calls.len(), 1);
-        assert_eq!(call_msg.tool_calls[0].call_id, "call-abc");
-        assert_eq!(call_msg.tool_calls[0].fn_name, "read_file");
-        let result_msg = turn
-            .messages
-            .iter()
-            .find(|m| !m.tool_responses.is_empty())
-            .expect("tool results");
-        assert_eq!(result_msg.tool_responses.len(), 1);
-        assert_eq!(result_msg.tool_responses[0].call_id, "call-abc");
-        assert_eq!(result_msg.tool_responses[0].content, "file contents: hello");
+        // 2 system (stable + volatile) + user + assistant + assistant + new user = 6.
+        assert_eq!(turn.messages.len(), 6);
+        assert!(turn.messages.iter().all(|m| m.tool_calls.is_empty()));
+        assert!(turn.messages.iter().all(|m| m.tool_responses.is_empty()));
+        assert!(
+            turn.messages
+                .iter()
+                .any(|m| m.role == LlmRole::Assistant && m.content == "reading it")
+        );
+        assert!(
+            turn.messages
+                .iter()
+                .any(|m| m.role == LlmRole::Assistant && m.content == "it says hello")
+        );
     }
 
     #[test]
