@@ -1,5 +1,5 @@
 {
-  "_updated": "2026-04-22",
+  "_updated": "2026-05-27",
   "_note": "Curated model catalog for /model and /aux commands. Only recent models (≤5mo), tool-capable, ≥100k ctx.",
   "openrouter": {
     "main": [
@@ -36,6 +36,7 @@
   },
   "openai": {
     "main": [
+      ["GPT-5.5", "gpt-5.5-codex", "$2/$12"],
       ["GPT-5.4", "gpt-5.4", "$2.50/$15"],
       ["GPT-5.4 Pro", "gpt-5.4-pro", "$5/$30"],
       ["GPT-5.3 Codex", "gpt-5.3-codex", "$2/$12"],

@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use lethe::config::Settings;
-use lethe::llm::models::{model_catalog, openai_oauth_supported_model, openai_oauth_token_file};
+use lethe::llm::models::{model_available_for_provider, model_catalog, openai_oauth_token_file};
 use lethe::llm::{
     LlmMessage, LlmRouter, LlmRouterConfig, OpenAIOAuthTokens, extract_openai_account_id,
     read_openai_oauth_tokens, write_openai_oauth_tokens,
@@ -67,14 +67,24 @@ pub async fn run() -> Result<()> {
     info(&format!("Using {}", provider.label()));
 
     // -- Models -------------------------------------------------------------
-    let (main_model, aux_model) = prompt_models(provider)?;
+    let (main_model, mut aux_model) = prompt_models(provider)?;
     info(&format!("Main: {main_model}"));
     info(&format!("Aux:  {aux_model}"));
 
     // -- Auth ---------------------------------------------------------------
     let (api_key, openai_oauth_tokens) = match provider {
         Provider::OpenAI => {
-            let auth = prompt_openai_auth(&existing_env, &main_model, &aux_model).await?;
+            let auth = prompt_openai_auth(&existing_env, &main_model).await?;
+            if matches!(&auth, OpenAIAuthChoice::Subscription { .. }) {
+                let adjusted_aux = openai_subscription_aux_model(&main_model, &aux_model);
+                if adjusted_aux != aux_model {
+                    info(&format!(
+                        "OpenAI subscription selected; using {adjusted_aux} for aux calls because `{}` isn't available under OpenAI.",
+                        aux_model
+                    ));
+                    aux_model = adjusted_aux;
+                }
+            }
             (
                 auth.api_key().map(str::to_string),
                 auth.token_file().map(Path::to_path_buf),
@@ -285,11 +295,7 @@ fn provider_badge(provider: Provider, detected: &[&'static str]) -> &'static str
     }
 }
 
-async fn prompt_openai_auth(
-    existing_env: &EnvMap,
-    main_model: &str,
-    aux_model: &str,
-) -> Result<OpenAIAuthChoice> {
+async fn prompt_openai_auth(existing_env: &EnvMap, main_model: &str) -> Result<OpenAIAuthChoice> {
     let token_file = openai_oauth_token_file();
     let existing_token = read_openai_oauth_tokens(&token_file);
     let existing_env_token = env_value("OPENAI_AUTH_TOKEN", existing_env);
@@ -325,7 +331,7 @@ async fn prompt_openai_auth(
             existing_env,
         )?)),
         _ => {
-            validate_openai_subscription_models(main_model, aux_model)?;
+            validate_openai_subscription_model(main_model)?;
             if existing_token.is_some() {
                 let reuse = prompt_line("  Reuse existing subscription token file? [Y/n]: ")?;
                 if !reuse.trim().to_ascii_lowercase().starts_with('n') {
@@ -339,17 +345,21 @@ async fn prompt_openai_auth(
     }
 }
 
-fn validate_openai_subscription_models(main_model: &str, aux_model: &str) -> Result<()> {
-    let invalid = [main_model, aux_model]
-        .into_iter()
-        .filter(|model| !model.trim().is_empty())
-        .find(|model| !openai_oauth_supported_model(model));
-    if let Some(model) = invalid {
+fn validate_openai_subscription_model(main_model: &str) -> Result<()> {
+    if !model_available_for_provider("openai", main_model) {
         bail!(
-            "OpenAI subscription login only supports Codex/chatgpt models. `{model}` is not allowlisted — choose an OpenAI API key or a supported model."
+            "OpenAI subscription login requires a model available under OpenAI. `{main_model}` is not in the OpenAI catalog — choose an OpenAI API key or a different model."
         );
     }
     Ok(())
+}
+
+fn openai_subscription_aux_model(main_model: &str, aux_model: &str) -> String {
+    if model_available_for_provider("openai", aux_model) {
+        aux_model.to_string()
+    } else {
+        main_model.to_string()
+    }
 }
 
 async fn run_openai_oauth_login(token_file: &Path) -> Result<()> {
@@ -963,11 +973,22 @@ mod tests {
     }
 
     #[test]
-    fn openai_subscription_models_must_be_allowlisted() {
-        assert!(validate_openai_subscription_models("gpt-5.3-codex", "gpt-5.3-codex").is_ok());
-        assert!(
-            validate_openai_subscription_models("openai/gpt-5.3-codex", "gpt-5.3-codex").is_ok()
+    fn openai_subscription_model_must_be_available_in_provider_catalog() {
+        assert!(validate_openai_subscription_model("gpt-5.5-codex").is_ok());
+        assert!(validate_openai_subscription_model("openai/gpt-5.5-codex").is_ok());
+        assert!(validate_openai_subscription_model("gpt-5.2").is_ok());
+        assert!(validate_openai_subscription_model("gpt-future").is_err());
+    }
+
+    #[test]
+    fn openai_subscription_aux_falls_back_to_main_when_needed() {
+        assert_eq!(
+            openai_subscription_aux_model("gpt-5.5-codex", "gpt-future"),
+            "gpt-5.5-codex"
         );
-        assert!(validate_openai_subscription_models("gpt-5.2", "gpt-5.2").is_err());
+        assert_eq!(
+            openai_subscription_aux_model("gpt-5.5-codex", "gpt-5.5-codex"),
+            "gpt-5.5-codex"
+        );
     }
 }

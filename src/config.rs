@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::llm::models::{
-    openai_oauth_available, openai_oauth_supported_model, provider_for_model,
+    model_available_for_provider, openai_oauth_available, provider_for_model,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -321,11 +321,12 @@ fn openai_subscription_blocked_message(
     }
 
     let provider = provider_for_model(llm_model).unwrap_or_else(|| llm_provider.trim());
-    if provider.eq_ignore_ascii_case("openai") && !openai_oauth_supported_model(llm_model) {
+    if provider.eq_ignore_ascii_case("openai") && !model_available_for_provider("openai", llm_model)
+    {
         return Some(format!(
-            "OpenAI subscription auth only supports Codex/chatgpt models.\n\
-             Selected model `{}` is not in the allowlist. Use OPENAI_API_KEY\n\
-             or switch to a Codex/chatgpt model before continuing.",
+            "OpenAI subscription auth requires a model available under OpenAI.\n\
+             Selected model `{}` is not in the OpenAI catalog. Use OPENAI_API_KEY\n\
+             or switch to a different model before continuing.",
             llm_model
         ));
     }
@@ -412,20 +413,20 @@ mod tests {
     }
 
     #[test]
-    fn openai_subscription_allowlist_is_enforced_only_for_native_openai_models() {
+    fn openai_subscription_catalog_is_enforced_for_native_openai_models() {
         assert!(
-            openai_subscription_blocked_message("gpt-5.3-codex", "openai", "", "", true,).is_none()
+            openai_subscription_blocked_message("gpt-5.5-codex", "openai", "", "", true,).is_none()
         );
 
-        let message = openai_subscription_blocked_message("gpt-5.2", "openai", "", "", true)
-            .expect("non-allowlisted model should fail");
-        assert!(message.contains("Codex/chatgpt"));
+        let message = openai_subscription_blocked_message("gpt-future", "openai", "", "", true)
+            .expect("model not in catalog should fail");
+        assert!(message.contains("OpenAI catalog"));
     }
 
     #[test]
-    fn openai_api_key_still_allows_non_allowlisted_models() {
+    fn openai_api_key_still_allows_non_catalog_models() {
         let mut settings = test_settings(std::path::Path::new("/tmp/lethe"));
-        settings.llm.llm_model = "gpt-5.2".to_string();
+        settings.llm.llm_model = "gpt-future".to_string();
         settings.llm.openai_api_key = "sk-test".to_string();
         assert!(settings.llm.ensure_ready().is_ok());
     }

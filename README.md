@@ -141,7 +141,7 @@ Lethe routes chat through `genai`. The Rust runtime supports API-key providers, 
 
 `LLM_MODEL_AUX` defaults to the main model and is used for lightweight/background calls.
 
-OpenAI subscription login is only enabled for Codex/chatgpt models; `lethe init` enforces that allowlist before starting the device flow.
+OpenAI subscription login is enabled for OpenAI models listed in the catalog; `lethe init` checks catalog availability before starting the device flow.
 
 For Anthropic subscription/OAuth mode, Lethe reads `ANTHROPIC_AUTH_TOKEN` directly or a Claude token file from `LETHE_ANTHROPIC_OAUTH_TOKENS`. When that variable is unset, it falls back to `$CREDENTIALS_DIR/anthropic_oauth_tokens.json`.
 

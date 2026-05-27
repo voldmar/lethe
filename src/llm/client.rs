@@ -27,7 +27,7 @@ use tokio::sync::{Mutex, Semaphore};
 
 use crate::config::Settings;
 use crate::llm::models::{
-    openai_oauth_available, openai_oauth_supported_model, openai_oauth_token_file,
+    model_available_for_provider, openai_oauth_available, openai_oauth_token_file,
     provider_for_model,
 };
 
@@ -1507,7 +1507,7 @@ fn should_use_openai_oauth(model: &str, config: &LlmRouterConfig) -> bool {
 
     openai_oauth_available()
         && openai_model_candidate(model, config)
-        && openai_oauth_supported_model(model)
+        && model_available_for_provider("openai", model)
 }
 
 fn openai_model_candidate(model: &str, config: &LlmRouterConfig) -> bool {

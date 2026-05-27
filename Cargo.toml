@@ -4,6 +4,7 @@ version = "0.20.5"
 edition = "2024"
 description = "Autonomous executive assistant with local memory and LLM"
 license = "MIT"
+build = "build.rs"
 
 [lib]
 name = "lethe"

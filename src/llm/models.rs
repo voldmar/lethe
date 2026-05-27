@@ -101,33 +101,34 @@ pub fn openai_oauth_token_file() -> PathBuf {
     home.join("credentials").join("openai_oauth_tokens.json")
 }
 
-pub fn openai_oauth_supported_model(model_id: &str) -> bool {
+pub fn model_available_for_provider(provider: &str, model_id: &str) -> bool {
+    let provider = provider.trim().to_ascii_lowercase();
     let model_id = model_id.trim();
-    if model_id.is_empty() {
+    if provider.is_empty() || model_id.is_empty() {
         return false;
     }
-    let model_id = model_id
-        .strip_prefix("openai/")
-        .filter(|rest| !rest.is_empty())
-        .unwrap_or(model_id)
-        .trim();
-    let Some(openai_catalog) = model_catalog().get("openai") else {
+    let model_id = if provider == "openai" {
+        model_id
+            .strip_prefix("openai/")
+            .filter(|rest| !rest.is_empty())
+            .unwrap_or(model_id)
+            .trim()
+    } else {
+        model_id
+    };
+
+    let Some(provider_catalog) = model_catalog().get(provider.as_str()) else {
         return false;
     };
 
-    openai_catalog
+    provider_catalog
         .values()
         .flat_map(|entries| entries.iter())
-        .any(|entry| entry.model_id() == model_id && openai_oauth_catalog_entry(entry))
+        .any(|entry| entry.model_id() == model_id)
 }
 
-fn openai_oauth_catalog_entry(entry: &ModelEntry) -> bool {
-    let name = entry.name().to_ascii_lowercase();
-    let model_id = entry.model_id().to_ascii_lowercase();
-    name.contains("codex")
-        || name.contains("chatgpt")
-        || model_id.contains("codex")
-        || model_id.contains("chatgpt")
+pub fn openai_oauth_supported_model(model_id: &str) -> bool {
+    model_available_for_provider("openai", model_id)
 }
 
 /// Per-model context window (tokens), as declared in
@@ -241,6 +242,7 @@ mod tests {
             provider_for_model("openrouter/openai/gpt-5.4-nano"),
             Some("openrouter")
         );
+        assert_eq!(provider_for_model("gpt-5.5-codex"), Some("openai"));
         assert_eq!(provider_for_model("gpt-future"), Some("openai"));
         assert_eq!(provider_for_model("chatgpt-5.4"), Some("openai"));
         assert_eq!(provider_for_model("codex-foo"), Some("openai"));
@@ -261,10 +263,18 @@ mod tests {
     }
 
     #[test]
-    fn openai_oauth_supported_models_use_catalog_allowlist() {
-        assert!(openai_oauth_supported_model("gpt-5.3-codex"));
-        assert!(openai_oauth_supported_model("openai/gpt-5.3-codex"));
-        assert!(!openai_oauth_supported_model("gpt-5.2"));
+    fn model_availability_uses_provider_catalog() {
+        assert!(model_available_for_provider("openai", "gpt-5.5-codex"));
+        assert!(model_available_for_provider(
+            "openai",
+            "openai/gpt-5.5-codex"
+        ));
+        assert!(model_available_for_provider("openai", "gpt-5.2"));
+        assert!(!model_available_for_provider("openai", "gpt-future"));
+        assert!(model_available_for_provider(
+            "openrouter",
+            "openrouter/openai/gpt-5.4"
+        ));
     }
 
     #[test]
