@@ -16,14 +16,14 @@ Lethe is a long-running personal AI assistant with a brain-inspired cognitive ar
 cargo build --release
 install -m 755 target/release/lethe ~/.local/bin/lethe
 
-# 2. Set up — interactive prompts for provider, model, API key, workspace
+# 2. Set up — interactive prompts for provider, model, API key, or ChatGPT subscription login
 lethe init
 
 # 3. Chat
 lethe chat -m "hello"
 ```
 
-`lethe init` writes `~/.lethe/config/.env`, seeds the workspace and core memory blocks, and runs a smoke test against the LLM and embedding pipeline before declaring success. If you'd rather configure by hand, copy `.env.example` and edit. The first turn that uses recall/notes triggers a one-time ~150MB download of the embedding runtime and model (progress is shown).
+`lethe init` writes `~/.lethe/config/.env`, seeds the workspace and core memory blocks, and runs a smoke test against the LLM and embedding pipeline before declaring success. For OpenAI, it can also do ChatGPT subscription login and writes `LETHE_OPENAI_OAUTH_TOKENS` into the generated `.env` so Lethe can reuse the token file later. If you'd rather configure by hand, copy `.env.example` and edit. The first turn that uses recall/notes triggers a one-time ~150MB download of the embedding runtime and model (progress is shown).
 
 Sanity-check an existing setup any time with `lethe check` — it pings the model and exercises the embedding pipeline rather than just printing config.
 
@@ -128,12 +128,12 @@ API mode binds to `LETHE_API_HOST` (`127.0.0.1` by default). Use a reverse proxy
 
 ## LLM Providers
 
-Lethe routes chat through `genai`. The Rust runtime supports API-key based providers and OpenAI-compatible local servers:
+Lethe routes chat through `genai`. The Rust runtime supports API-key providers, OpenAI subscription login, and OpenAI-compatible local servers:
 
 | Provider | Auth | Example `LLM_MODEL` |
 |----------|------|---------------------|
 | Anthropic | `ANTHROPIC_API_KEY` or Claude subscription OAuth token file | `claude-opus-4-6` |
-| OpenAI | `OPENAI_API_KEY` | `gpt-5.4` |
+| OpenAI | `OPENAI_API_KEY` or `OPENAI_AUTH_TOKEN` / `LETHE_OPENAI_OAUTH_TOKENS` | `gpt-5.4` |
 | OpenRouter | `OPENROUTER_API_KEY` | `openrouter/moonshotai/kimi-k2.6` |
 | Local OpenAI-compatible | `LLM_API_BASE` + `OPENAI_API_KEY=local` | `openai/gemma-4-31B-it-Q8_0.gguf` |
 
@@ -141,7 +141,11 @@ Lethe routes chat through `genai`. The Rust runtime supports API-key based provi
 
 `LLM_MODEL_AUX` defaults to the main model and is used for lightweight/background calls.
 
+OpenAI subscription login is only enabled for Codex/chatgpt models; `lethe init` enforces that allowlist before starting the device flow.
+
 For Anthropic subscription/OAuth mode, Lethe reads `ANTHROPIC_AUTH_TOKEN` directly or a Claude token file from `LETHE_ANTHROPIC_OAUTH_TOKENS`. When that variable is unset, it falls back to `$CREDENTIALS_DIR/anthropic_oauth_tokens.json`.
+
+OpenAI subscription tokens come from `OPENAI_AUTH_TOKEN` or `LETHE_OPENAI_OAUTH_TOKENS` (default `$CREDENTIALS_DIR/openai_oauth_tokens.json`).
 
 ## Configuration
 
@@ -171,6 +175,8 @@ Configuration is read from process environment, a local `.env`, and `$LETHE_HOME
 | `ANTHROPIC_AUTH_TOKEN` | Optional Anthropic OAuth access token | unset |
 | `LETHE_ANTHROPIC_OAUTH_TOKENS` | Optional Anthropic OAuth token file or directory | `$CREDENTIALS_DIR/anthropic_oauth_tokens.json` |
 | `OPENAI_API_KEY` | OpenAI/local-compatible key | unset |
+| `OPENAI_AUTH_TOKEN` | Optional OpenAI OAuth access token | unset |
+| `LETHE_OPENAI_OAUTH_TOKENS` | Optional OpenAI OAuth token file or directory | `$CREDENTIALS_DIR/openai_oauth_tokens.json` |
 | `EXA_API_KEY` | Exa search/fetch tools | unset |
 | `LETHE_SEMANTIC_SEARCH_ENABLED` | Enable LanceDB vector search | `true` |
 | `LETHE_EMBEDDING_PROVIDER` | `fastembed` or `hash` | `fastembed` |
