@@ -5,7 +5,7 @@
 #
 # Downloads the prebuilt `lethe` and (when available) `lethe-migrate`
 # binaries for the current platform, then hands off to `lethe init`
-# for provider / model / API-key setup. Falls back to a source build
+# for provider / model / API-key or ChatGPT subscription setup. Falls back to a source build
 # when no binary asset matches the host (or `LETHE_INSTALL_FROM_SOURCE=1`).
 #
 # Env knobs:
@@ -210,7 +210,7 @@ run_init_wizard() {
         return
     fi
     echo ""
-    info "Launching setup wizard: $BIN_DIR/lethe init"
+    info "Launching setup wizard: $BIN_DIR/lethe init (API key or ChatGPT subscription login)"
     echo ""
     if ! "$BIN_DIR/lethe" init < /dev/tty; then
         warn "Setup wizard exited with an error."

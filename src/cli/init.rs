@@ -1,9 +1,7 @@
-//! Interactive `lethe init` wizard. Ports the working flow from the Python
-//! main branch's `install.sh` (`prompt_provider`, `prompt_model`,
-//! `prompt_api_key`, `setup_config`) into a single Rust command that:
+//! Interactive `lethe init` wizard.
 //!
-//! 1. Detects any LLM keys already in the environment (and the existing
-//!    `~/.lethe/config/.env` if one exists).
+//! 1. Detects any LLM credentials already in the environment (and the
+//!    existing `~/.lethe/config/.env` if one exists).
 //! 2. Walks the user through provider / model / key / Telegram choices.
 //! 3. Writes `~/.lethe/config/.env` and seeds the workspace + default memory
 //!    blocks.
@@ -14,13 +12,28 @@
 //! variables directly in scripted contexts).
 
 use std::io::{self, BufRead, IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use lethe::config::Settings;
-use lethe::llm::models::model_catalog;
-use lethe::llm::{LlmMessage, LlmRouter, LlmRouterConfig};
+use lethe::llm::models::{model_catalog, openai_oauth_supported_model, openai_oauth_token_file};
+use lethe::llm::{
+    LlmMessage, LlmRouter, LlmRouterConfig, OpenAIOAuthTokens, extract_openai_account_id,
+    read_openai_oauth_tokens, write_openai_oauth_tokens,
+};
 use lethe::memory::{BlockManager, MemoryStore};
+use serde_json::Value;
+
+const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const OPENAI_DEVICE_USERCODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
+const OPENAI_DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
+const OPENAI_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const OPENAI_DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
+const OPENAI_LOGIN_USER_AGENT: &str = "lethe-oauth-login";
+const OPENAI_DEVICE_AUTH_TIMEOUT_SECONDS: u64 = 900;
+const OPENAI_DEVICE_POLL_SAFETY_MARGIN_SECONDS: u64 = 3;
 
 /// Top-level entry point.
 pub async fn run() -> Result<()> {
@@ -43,7 +56,10 @@ pub async fn run() -> Result<()> {
 
     let detected = detect_keys(&existing_env);
     if !detected.is_empty() {
-        println!("Found existing API keys for: {}\n", detected.join(", "));
+        println!(
+            "Found existing LLM credentials for: {}\n",
+            detected.join(", ")
+        );
     }
 
     // -- Provider -----------------------------------------------------------
@@ -55,8 +71,17 @@ pub async fn run() -> Result<()> {
     info(&format!("Main: {main_model}"));
     info(&format!("Aux:  {aux_model}"));
 
-    // -- API key ------------------------------------------------------------
-    let api_key = prompt_api_key(provider, &existing_env)?;
+    // -- Auth ---------------------------------------------------------------
+    let (api_key, openai_oauth_tokens) = match provider {
+        Provider::OpenAI => {
+            let auth = prompt_openai_auth(&existing_env, &main_model, &aux_model).await?;
+            (
+                auth.api_key().map(str::to_string),
+                auth.token_file().map(Path::to_path_buf),
+            )
+        }
+        _ => (Some(prompt_api_key(provider, &existing_env)?), None),
+    };
 
     // -- Optional Telegram --------------------------------------------------
     let telegram = prompt_telegram(&existing_env)?;
@@ -70,7 +95,8 @@ pub async fn run() -> Result<()> {
         provider,
         &main_model,
         &aux_model,
-        &api_key,
+        api_key.as_deref(),
+        openai_oauth_tokens.as_deref(),
         telegram.as_ref(),
     )?;
     info(&format!("Wrote {}", env_path.display()));
@@ -83,7 +109,14 @@ pub async fn run() -> Result<()> {
 
     // -- Smoke test ---------------------------------------------------------
     println!("\nRunning smoke test...");
-    smoke_test(provider, &main_model, &aux_model, &api_key).await?;
+    smoke_test(
+        provider,
+        &main_model,
+        &aux_model,
+        api_key.as_deref(),
+        openai_oauth_tokens.as_deref(),
+    )
+    .await?;
 
     println!();
     success("Setup complete.");
@@ -140,22 +173,56 @@ impl Provider {
     }
 }
 
-fn detect_keys(existing_env: &EnvMap) -> Vec<&'static str> {
-    let mut out = Vec::new();
-    for provider in [Provider::OpenRouter, Provider::Anthropic, Provider::OpenAI] {
-        let key = provider.key_env();
-        let present = std::env::var(key)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .is_some()
-            || existing_env
-                .get(key)
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false);
-        if present {
-            out.push(key);
+#[derive(Clone, Debug)]
+enum OpenAIAuthChoice {
+    ApiKey(String),
+    Subscription { token_file: PathBuf },
+}
+
+impl OpenAIAuthChoice {
+    fn api_key(&self) -> Option<&str> {
+        match self {
+            Self::ApiKey(key) => Some(key.as_str()),
+            Self::Subscription { .. } => None,
         }
     }
+
+    fn token_file(&self) -> Option<&Path> {
+        match self {
+            Self::ApiKey(_) => None,
+            Self::Subscription { token_file } => Some(token_file.as_path()),
+        }
+    }
+}
+
+fn detect_keys(existing_env: &EnvMap) -> Vec<&'static str> {
+    let token_file = openai_oauth_token_file();
+    let mut out = Vec::new();
+
+    for provider in [Provider::OpenRouter, Provider::Anthropic, Provider::OpenAI] {
+        let present = match provider {
+            Provider::OpenAI => {
+                let openai_api_key = env_present(provider.key_env(), existing_env);
+                let openai_subscription = env_present("OPENAI_AUTH_TOKEN", existing_env)
+                    || read_openai_oauth_tokens(&token_file).is_some();
+                openai_api_key || openai_subscription
+            }
+            _ => env_present(provider.key_env(), existing_env),
+        };
+
+        if present {
+            out.push(provider.key_env());
+        }
+    }
+
+    if env_present("OPENAI_AUTH_TOKEN", existing_env)
+        || read_openai_oauth_tokens(&token_file).is_some()
+    {
+        out.push("OPENAI_AUTH_TOKEN");
+    }
+
+    out.sort_unstable();
+    out.dedup();
     out
 }
 
@@ -170,21 +237,19 @@ fn prompt_provider(detected: &[&'static str]) -> Result<Provider> {
             Provider::Anthropic,
             "Anthropic (API key or Claude subscription token)",
         ),
-        (Provider::OpenAI, "OpenAI (API key)"),
+        (
+            Provider::OpenAI,
+            "OpenAI (API key or ChatGPT subscription login)",
+        ),
     ];
     for (idx, (provider, desc)) in entries.iter().enumerate() {
-        let badge = if detected.contains(&provider.key_env()) {
-            " [key found]"
-        } else {
-            ""
-        };
+        let badge = provider_badge(*provider, detected);
         println!("  {}) {desc}{badge}", idx + 1);
     }
 
-    // Default to the first detected provider, else OpenRouter.
     let default = entries
         .iter()
-        .position(|(p, _)| detected.contains(&p.key_env()))
+        .position(|(provider, _)| provider_detected(*provider, detected))
         .map(|i| i + 1)
         .unwrap_or(1);
 
@@ -200,6 +265,304 @@ fn prompt_provider(detected: &[&'static str]) -> Result<Provider> {
             .unwrap_or(default)
     };
     Ok(entries[n - 1].0)
+}
+
+fn provider_detected(provider: Provider, detected: &[&'static str]) -> bool {
+    match provider {
+        Provider::OpenAI => {
+            detected.contains(&"OPENAI_API_KEY") || detected.contains(&"OPENAI_AUTH_TOKEN")
+        }
+        _ => detected.contains(&provider.key_env()),
+    }
+}
+
+fn provider_badge(provider: Provider, detected: &[&'static str]) -> &'static str {
+    match provider {
+        Provider::OpenAI if detected.contains(&"OPENAI_AUTH_TOKEN") => " [subscription found]",
+        Provider::OpenAI if detected.contains(&"OPENAI_API_KEY") => " [key found]",
+        _ if detected.contains(&provider.key_env()) => " [key found]",
+        _ => "",
+    }
+}
+
+async fn prompt_openai_auth(
+    existing_env: &EnvMap,
+    main_model: &str,
+    aux_model: &str,
+) -> Result<OpenAIAuthChoice> {
+    let token_file = openai_oauth_token_file();
+    let existing_token = read_openai_oauth_tokens(&token_file);
+    let existing_env_token = env_value("OPENAI_AUTH_TOKEN", existing_env);
+
+    println!("\nOpenAI auth choice:");
+    println!("  1) OpenAI API key");
+    println!("  2) ChatGPT subscription login");
+    if existing_token.is_some() {
+        println!(
+            "  Found existing subscription token file: {}",
+            token_file.display()
+        );
+    } else if existing_env_token.is_some() {
+        println!("  Found existing OPENAI_AUTH_TOKEN in env.");
+    }
+
+    let default = if existing_token.is_some() || existing_env_token.is_some() {
+        2
+    } else {
+        1
+    };
+    let answer = prompt_line(&format!("  Choose [1-2, default={default}]: "))?;
+    let choice = answer
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|n| (1..=2).contains(n))
+        .unwrap_or(default);
+
+    match choice {
+        1 => Ok(OpenAIAuthChoice::ApiKey(prompt_api_key(
+            Provider::OpenAI,
+            existing_env,
+        )?)),
+        _ => {
+            validate_openai_subscription_models(main_model, aux_model)?;
+            if existing_token.is_some() {
+                let reuse = prompt_line("  Reuse existing subscription token file? [Y/n]: ")?;
+                if !reuse.trim().to_ascii_lowercase().starts_with('n') {
+                    return Ok(OpenAIAuthChoice::Subscription { token_file });
+                }
+            }
+
+            run_openai_oauth_login(&token_file).await?;
+            Ok(OpenAIAuthChoice::Subscription { token_file })
+        }
+    }
+}
+
+fn validate_openai_subscription_models(main_model: &str, aux_model: &str) -> Result<()> {
+    let invalid = [main_model, aux_model]
+        .into_iter()
+        .filter(|model| !model.trim().is_empty())
+        .find(|model| !openai_oauth_supported_model(model));
+    if let Some(model) = invalid {
+        bail!(
+            "OpenAI subscription login only supports Codex/chatgpt models. `{model}` is not allowlisted — choose an OpenAI API key or a supported model."
+        );
+    }
+    Ok(())
+}
+
+async fn run_openai_oauth_login(token_file: &Path) -> Result<()> {
+    println!("\nOpenAI OAuth Login (ChatGPT Plus/Pro Codex)\n");
+    println!("This uses device flow, suitable for local and headless environments.");
+    println!("1) Open the verification URL");
+    println!("2) Enter the code shown below");
+    println!("3) Return to this terminal and wait for completion\n");
+
+    let device = start_openai_device_flow().await?;
+    let device_auth_id = device
+        .get("device_auth_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let user_code = device
+        .get("user_code")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let interval = device.get("interval").and_then(Value::as_u64).unwrap_or(5);
+    let verify_url = device
+        .get("verification_uri")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            device
+                .get("verification_uri_complete")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("https://auth.openai.com/codex/device");
+
+    if device_auth_id.is_empty() || user_code.is_empty() {
+        bail!("Invalid device authorization response: {device:?}");
+    }
+
+    println!("Verification URL: {verify_url}");
+    println!("User code: {user_code}\n");
+    try_open_browser(verify_url);
+    println!("Waiting for authorization (Ctrl+C to cancel)...");
+
+    let auth_data = poll_openai_authorization_code(device_auth_id, user_code, interval).await?;
+    let authorization_code = auth_data
+        .get("authorization_code")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let code_verifier = auth_data
+        .get("code_verifier")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if authorization_code.is_empty() || code_verifier.is_empty() {
+        bail!("Invalid authorization completion payload: {auth_data:?}");
+    }
+
+    let token_data = exchange_openai_authorization_code(authorization_code, code_verifier).await?;
+    let access_token = token_data
+        .get("access_token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("No access token in response: {token_data:?}"))?
+        .to_string();
+    let refresh_token = token_data
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let expires_in = token_data
+        .get("expires_in")
+        .and_then(Value::as_f64)
+        .unwrap_or(3600.0);
+    let account_id = token_data
+        .get("account_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            token_data
+                .get("id_token")
+                .and_then(Value::as_str)
+                .and_then(extract_openai_account_id)
+        })
+        .or_else(|| {
+            token_data
+                .get("access_token")
+                .and_then(Value::as_str)
+                .and_then(extract_openai_account_id)
+        });
+
+    write_openai_oauth_tokens(
+        token_file,
+        &OpenAIOAuthTokens {
+            access_token: Some(access_token),
+            refresh_token,
+            expires_at: Some(unix_now_seconds() + expires_in),
+            account_id,
+            env_access_token: false,
+        },
+    )?;
+
+    println!("OAuth tokens saved to {}", token_file.display());
+    Ok(())
+}
+
+async fn start_openai_device_flow() -> Result<Value> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let response = client
+        .post(OPENAI_DEVICE_USERCODE_URL)
+        .header("Content-Type", "application/json")
+        .header("User-Agent", OPENAI_LOGIN_USER_AGENT)
+        .json(&serde_json::json!({"client_id": OPENAI_CLIENT_ID}))
+        .send()
+        .await
+        .context("starting OpenAI device flow")?;
+
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .context("reading device-flow response")?;
+    if !status.is_success() {
+        bail!("Device auth start failed: {} {}", status, text);
+    }
+    Ok(serde_json::from_str(&text).context("parsing device-flow response JSON")?)
+}
+
+async fn poll_openai_authorization_code(
+    device_auth_id: &str,
+    user_code: &str,
+    interval_seconds: u64,
+) -> Result<Value> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let wait =
+        Duration::from_secs(interval_seconds.max(1) + OPENAI_DEVICE_POLL_SAFETY_MARGIN_SECONDS);
+    let deadline = Instant::now() + Duration::from_secs(OPENAI_DEVICE_AUTH_TIMEOUT_SECONDS);
+
+    loop {
+        let response = client
+            .post(OPENAI_DEVICE_TOKEN_URL)
+            .header("Content-Type", "application/json")
+            .header("User-Agent", OPENAI_LOGIN_USER_AGENT)
+            .json(&serde_json::json!({
+                "device_auth_id": device_auth_id,
+                "user_code": user_code,
+            }))
+            .send()
+            .await
+            .context("polling OpenAI device authorization")?;
+
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .context("reading device polling response")?;
+        if status.is_success() {
+            return Ok(serde_json::from_str(&text).context("parsing device polling JSON")?);
+        }
+
+        if matches!(status.as_u16(), 403 | 404) {
+            if Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(wait).await;
+            continue;
+        }
+
+        bail!("Device authorization polling failed: {} {}", status, text);
+    }
+
+    bail!(
+        "Timed out waiting for OpenAI device authorization after {}s",
+        OPENAI_DEVICE_AUTH_TIMEOUT_SECONDS
+    )
+}
+
+async fn exchange_openai_authorization_code(
+    authorization_code: &str,
+    code_verifier: &str,
+) -> Result<Value> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
+    let response = client
+        .post(OPENAI_TOKEN_URL)
+        .header("User-Agent", OPENAI_LOGIN_USER_AGENT)
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", authorization_code),
+            ("redirect_uri", OPENAI_DEVICE_REDIRECT_URI),
+            ("client_id", OPENAI_CLIENT_ID),
+            ("code_verifier", code_verifier),
+        ])
+        .send()
+        .await
+        .context("exchanging OpenAI authorization code")?;
+
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .context("reading token exchange response")?;
+    if !status.is_success() {
+        bail!("Token exchange failed: {} {}", status, text);
+    }
+    Ok(serde_json::from_str(&text).context("parsing token exchange JSON")?)
+}
+
+fn try_open_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let _ = Command::new("open").arg(url).spawn();
+
+    #[cfg(target_os = "windows")]
+    let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let _ = Command::new("xdg-open").arg(url).spawn();
 }
 
 // =============================================================================
@@ -267,15 +630,7 @@ fn pick_model(label: &str, entries: &[lethe::llm::models::ModelEntry]) -> Result
 
 fn prompt_api_key(provider: Provider, existing_env: &EnvMap) -> Result<String> {
     let env_name = provider.key_env();
-    let existing = std::env::var(env_name)
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| {
-            existing_env
-                .get(env_name)
-                .filter(|v| !v.trim().is_empty())
-                .cloned()
-        });
+    let existing = env_value(env_name, existing_env);
     if let Some(key) = existing {
         println!("\nFound existing {env_name}: {}", mask_key(&key));
         let answer = prompt_line("Use it? [Y/n]: ")?;
@@ -326,7 +681,7 @@ fn prompt_telegram(existing_env: &EnvMap) -> Result<Option<TelegramSetup>> {
     if !yes_no.trim().to_ascii_lowercase().starts_with('y') {
         return Ok(None);
     }
-    let existing_token = existing_env.get("TELEGRAM_BOT_TOKEN").cloned();
+    let existing_token = env_value("TELEGRAM_BOT_TOKEN", existing_env);
     let token = match existing_token.as_deref().filter(|v| !v.trim().is_empty()) {
         Some(value) => {
             println!("  Found existing TELEGRAM_BOT_TOKEN: {}", mask_key(value));
@@ -382,7 +737,8 @@ fn write_env_file(
     provider: Provider,
     main_model: &str,
     aux_model: &str,
-    api_key: &str,
+    api_key: Option<&str>,
+    openai_oauth_token_file: Option<&Path>,
     telegram: Option<&TelegramSetup>,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -397,7 +753,18 @@ fn write_env_file(
     body.push_str(&format!("LLM_PROVIDER={}\n", provider.id()));
     body.push_str(&format!("LLM_MODEL={main_model}\n"));
     body.push_str(&format!("LLM_MODEL_AUX={aux_model}\n"));
-    body.push_str(&format!("{}={}\n\n", provider.key_env(), api_key));
+    match (provider, api_key, openai_oauth_token_file) {
+        (Provider::OpenAI, _, Some(token_file)) => {
+            body.push_str(&format!(
+                "LETHE_OPENAI_OAUTH_TOKENS={}\n\n",
+                token_file.display()
+            ));
+        }
+        (_, Some(key), _) => {
+            body.push_str(&format!("{}={}\n\n", provider.key_env(), key));
+        }
+        _ => body.push('\n'),
+    }
     if let Some(telegram) = telegram {
         body.push_str("# Telegram bot\n");
         body.push_str(&format!("TELEGRAM_BOT_TOKEN={}\n", telegram.bot_token));
@@ -411,7 +778,7 @@ fn write_env_file(
     }
     body.push_str("# Add more knobs from .env.example (background subsystems, paths, etc.)\n");
     std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
-    // Lock the file to user-read/write only — it contains API secrets.
+    // Lock the file to user-read/write only — it contains secrets.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -447,12 +814,22 @@ async fn smoke_test(
     provider: Provider,
     main_model: &str,
     aux_model: &str,
-    api_key: &str,
+    api_key: Option<&str>,
+    openai_oauth_token_file: Option<&Path>,
 ) -> Result<()> {
-    // Apply the new config in-process so the smoke test reflects what the
-    // user will actually run with on the next invocation.
     unsafe {
-        std::env::set_var(provider.key_env(), api_key);
+        std::env::remove_var("OPENAI_AUTH_TOKEN");
+        std::env::remove_var("LETHE_OPENAI_OAUTH_TOKENS");
+        std::env::remove_var(Provider::OpenRouter.key_env());
+        std::env::remove_var(Provider::Anthropic.key_env());
+        std::env::remove_var(Provider::OpenAI.key_env());
+
+        if let Some(token_file) = openai_oauth_token_file {
+            std::env::set_var("LETHE_OPENAI_OAUTH_TOKENS", token_file);
+        }
+        if let Some(api_key) = api_key {
+            std::env::set_var(provider.key_env(), api_key);
+        }
         std::env::set_var("LLM_PROVIDER", provider.id());
         std::env::set_var("LLM_MODEL", main_model);
         std::env::set_var("LLM_MODEL_AUX", aux_model);
@@ -515,6 +892,34 @@ fn prompt_line(prompt: &str) -> Result<String> {
         .to_string())
 }
 
+fn env_present(key: &str, existing_env: &EnvMap) -> bool {
+    std::env::var(key)
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty())
+        || existing_env
+            .get(key)
+            .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn env_value(key: &str, existing_env: &EnvMap) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            existing_env
+                .get(key)
+                .cloned()
+                .filter(|value| !value.trim().is_empty())
+        })
+}
+
+fn unix_now_seconds() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
 fn print_header() {
     println!("Lethe — guided setup");
     println!("--------------------\n");
@@ -530,4 +935,39 @@ fn success(message: &str) {
 
 fn warn(message: &str) {
     println!("! {message}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn openai_subscription_env_file_writes_token_path_and_skips_api_key() {
+        let tmp = tempdir().unwrap();
+        let env_path = tmp.path().join(".env");
+        let token_file = tmp.path().join("credentials/openai_oauth_tokens.json");
+        write_env_file(
+            &env_path,
+            Provider::OpenAI,
+            "gpt-5.3-codex",
+            "gpt-5.3-codex",
+            None,
+            Some(&token_file),
+            None,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&env_path).unwrap();
+        assert!(text.contains("LETHE_OPENAI_OAUTH_TOKENS="));
+        assert!(!text.contains("OPENAI_API_KEY="));
+    }
+
+    #[test]
+    fn openai_subscription_models_must_be_allowlisted() {
+        assert!(validate_openai_subscription_models("gpt-5.3-codex", "gpt-5.3-codex").is_ok());
+        assert!(
+            validate_openai_subscription_models("openai/gpt-5.3-codex", "gpt-5.3-codex").is_ok()
+        );
+        assert!(validate_openai_subscription_models("gpt-5.2", "gpt-5.2").is_err());
+    }
 }

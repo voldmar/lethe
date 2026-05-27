@@ -19,8 +19,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Interactive setup: pick provider + model + API key, write
-    /// ~/.lethe/config/.env, seed the workspace, run a smoke test.
+    /// Interactive setup: pick provider + model + API key or ChatGPT
+    /// subscription login, write ~/.lethe/config/.env, seed the workspace,
+    /// run a smoke test.
     Init,
     /// Validate the Rust runtime configuration and embedded prompt access.
     Check,
