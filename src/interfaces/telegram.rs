@@ -9,12 +9,12 @@ use thiserror::Error;
 use crate::memory::message_metadata::{MessageKind, MessageVisibility, annotate_value};
 
 mod formatting;
-pub use formatting::{
-    image_mime_type_from_path, is_emoji_only_reply, split_telegram_messages, telegram_parse_mode,
-};
 use formatting::{
     error_payload, expand_tilde, filename_from_url, image_extension_for_mime,
     is_invalid_reaction_error, safe_file_name,
+};
+pub use formatting::{
+    image_mime_type_from_path, is_emoji_only_reply, split_telegram_messages, telegram_parse_mode,
 };
 
 #[derive(Debug, Error)]
@@ -84,7 +84,10 @@ impl TelegramClient {
         // 400 with a parse error when the markdown is malformed (unbalanced
         // backticks, stray brackets); fall back to plain text in that case so
         // the user still sees the message.
-        match self.send_message_with_mode(chat_id, text, Some("Markdown")).await {
+        match self
+            .send_message_with_mode(chat_id, text, Some("Markdown"))
+            .await
+        {
             Ok(id) => Ok(id),
             Err(error) if is_parse_entity_error(&error) => {
                 tracing::warn!(
@@ -707,7 +710,6 @@ impl IncomingTelegramSticker {
     }
 }
 
-
 impl IncomingTelegramReaction {
     pub fn content(&self) -> String {
         format!(
@@ -1268,7 +1270,6 @@ pub fn set_message_reaction_blocking(
         Err(error) => Err(error),
     }
 }
-
 
 #[cfg(test)]
 mod tests {

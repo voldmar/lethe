@@ -20,7 +20,8 @@ use uuid::Uuid;
 use crate::agent::{Agent, TurnRequest};
 use crate::config::Settings;
 use crate::conversation::{ConversationManager, ProcessCallback, ProcessContext};
-use crate::llm::models::{available_providers, provider_for_model};
+use crate::llm::llm_auth_mode_for_settings;
+use crate::llm::models::{ProviderInfo, available_providers, provider_for_model};
 use crate::llm::prompts::PromptStore;
 use crate::memory::message_metadata::{
     MessageKind, MessageVisibility, metadata_value as message_metadata_value,
@@ -518,7 +519,7 @@ async fn model_get(State(state): State<ApiState>, headers: HeaderMap) -> Respons
         "model": config.model,
         "model_aux": config.aux_model,
         "provider": model_provider(&config.model, &state.settings.llm.llm_provider),
-        "current_auth": "API",
+        "current_auth": llm_auth_mode_for_settings(&state.settings),
         "available_providers": available_provider_ids(),
         "provider_info": available_providers(),
     }))
@@ -555,6 +556,9 @@ async fn model_post(
         "model": config.model,
         "model_aux": config.aux_model,
         "provider": model_provider(&config.model, &state.settings.llm.llm_provider),
+        "current_auth": llm_auth_mode_for_settings(&state.settings),
+        "available_providers": available_provider_ids(),
+        "provider_info": available_providers(),
         "changed": changed,
     }))
     .into_response()
@@ -592,7 +596,8 @@ async fn serve_file(
     if let Some(response) = require_auth(&state, &headers) {
         return response;
     }
-    let Some(path) = resolve_workspace_path(&state.settings.paths.workspace_dir, &query.path) else {
+    let Some(path) = resolve_workspace_path(&state.settings.paths.workspace_dir, &query.path)
+    else {
         return json_error(StatusCode::FORBIDDEN, "path outside workspace");
     };
     if !path.is_file() {
@@ -652,10 +657,17 @@ fn metadata_i64(metadata: &serde_json::Map<String, Value>, key: &str) -> Option<
 }
 
 fn available_provider_ids() -> Vec<String> {
-    available_providers()
-        .into_iter()
-        .map(|provider| provider.provider)
-        .collect()
+    unique_provider_ids(available_providers())
+}
+
+fn unique_provider_ids(providers: impl IntoIterator<Item = ProviderInfo>) -> Vec<String> {
+    let mut ids = Vec::new();
+    for provider in providers {
+        if !ids.contains(&provider.provider) {
+            ids.push(provider.provider);
+        }
+    }
+    ids
 }
 
 fn model_provider<'a>(model: &'a str, configured_provider: &'a str) -> &'a str {
@@ -700,16 +712,21 @@ async fn process_api_heartbeat_once(
     heartbeat: &mut Heartbeat,
     limiter: &mut ProactiveRateLimiter,
 ) -> Result<()> {
-    let prompts = PromptStore::new(&state.settings.paths.workspace_dir, &state.settings.paths.config_dir);
+    let prompts = PromptStore::new(
+        &state.settings.paths.workspace_dir,
+        &state.settings.paths.config_dir,
+    );
     let reminders = active_reminders(&state.settings)?;
     let prompt = heartbeat.trigger(&prompts, &reminders);
     let response = state
         .agent
-        .chat_once(TurnRequest::new(&prompt.message).with_metadata(message_metadata_value(
-            MessageVisibility::Internal,
-            MessageKind::Heartbeat,
-            "api_heartbeat",
-        )))
+        .chat_once(
+            TurnRequest::new(&prompt.message).with_metadata(message_metadata_value(
+                MessageVisibility::Internal,
+                MessageKind::Heartbeat,
+                "api_heartbeat",
+            )),
+        )
         .await?;
     let _background = state
         .agent
@@ -873,5 +890,28 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn unique_provider_ids_remove_duplicates_without_reordering() {
+        let ids = unique_provider_ids(vec![
+            ProviderInfo {
+                provider: "anthropic".to_string(),
+                label: "Anthropic (API key)".to_string(),
+                auth: "API".to_string(),
+            },
+            ProviderInfo {
+                provider: "openai".to_string(),
+                label: "OpenAI (subscription)".to_string(),
+                auth: "sub".to_string(),
+            },
+            ProviderInfo {
+                provider: "openai".to_string(),
+                label: "OpenAI (API key)".to_string(),
+                auth: "API".to_string(),
+            },
+        ]);
+
+        assert_eq!(ids, vec!["anthropic".to_string(), "openai".to_string()]);
     }
 }

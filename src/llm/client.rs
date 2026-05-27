@@ -2,6 +2,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use base64::Engine;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -24,9 +26,16 @@ use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::config::Settings;
+use crate::llm::models::{
+    openai_oauth_available, openai_oauth_supported_model, openai_oauth_token_file,
+    provider_for_model,
+};
 
 const OPENROUTER_ENDPOINT: &str = "https://openrouter.ai/api/v1/";
 const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/";
+const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
+const OPENAI_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const OPENAI_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const ANTHROPIC_ENDPOINT: &str = "https://api.anthropic.com/v1/";
 const ANTHROPIC_OAUTH_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -240,16 +249,19 @@ pub struct LlmRouter {
     client: Client,
     config: LlmRouterConfig,
     anthropic_oauth: Option<AnthropicOAuthClient>,
+    openai_oauth: Option<OpenAIOAuthClient>,
 }
 
 impl LlmRouter {
     pub fn new(config: LlmRouterConfig) -> Self {
         let client = build_client(&config);
         let anthropic_oauth = AnthropicOAuthClient::from_env();
+        let openai_oauth = OpenAIOAuthClient::from_env();
         Self {
             client,
             config,
             anthropic_oauth,
+            openai_oauth,
         }
     }
 
@@ -280,6 +292,14 @@ impl LlmRouter {
         }
 
         let options = self.config.chat_options();
+        if let Some(oauth) = &self.openai_oauth
+            && should_use_openai_oauth(model, &self.config)
+        {
+            return oauth
+                .exec_chat_request(model, request, &options)
+                .await
+                .with_context(|| format!("LLM chat request failed for model {model}"));
+        }
         if let Some(oauth) = &self.anthropic_oauth
             && should_use_anthropic_oauth(model, &self.config)
         {
@@ -319,6 +339,564 @@ impl LlmRouter {
             }
         }
     }
+}
+
+#[derive(Clone)]
+struct OpenAIOAuthClient {
+    http: reqwest::Client,
+    token_file: PathBuf,
+    tokens: Arc<Mutex<OpenAIOAuthTokens>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct OpenAIOAuthTokens {
+    pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub expires_at: Option<f64>,
+    pub account_id: Option<String>,
+    #[serde(skip)]
+    pub env_access_token: bool,
+}
+
+impl OpenAIOAuthClient {
+    fn from_env() -> Option<Self> {
+        let token_file = openai_oauth_token_file();
+        let tokens = if let Ok(access_token) = env::var("OPENAI_AUTH_TOKEN") {
+            let access_token = access_token.trim().to_string();
+            if access_token.is_empty() {
+                None
+            } else {
+                Some(OpenAIOAuthTokens {
+                    access_token: Some(access_token),
+                    env_access_token: true,
+                    ..Default::default()
+                })
+            }
+        } else {
+            read_openai_oauth_tokens(&token_file)
+        }?;
+
+        Some(Self {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(600))
+                .build()
+                .ok()?,
+            token_file,
+            tokens: Arc::new(Mutex::new(tokens)),
+        })
+    }
+
+    async fn exec_chat_request(
+        &self,
+        model: &str,
+        request: ChatRequest,
+        options: &ChatOptions,
+    ) -> Result<ChatResponse> {
+        self.call_responses_once(model, request, options)
+            .await
+            .with_context(|| format!("OpenAI OAuth chat request failed for model {model}"))
+    }
+
+    async fn call_responses_once(
+        &self,
+        model: &str,
+        request: ChatRequest,
+        options: &ChatOptions,
+    ) -> Result<ChatResponse> {
+        self.ensure_access().await?;
+
+        let access_token = {
+            let tokens = self.tokens.lock().await;
+            tokens
+                .access_token
+                .clone()
+                .ok_or_else(|| anyhow!("OpenAI OAuth access token is missing"))?
+        };
+        let request_log = json!({
+            "auth": "openai_oauth",
+            "endpoint": OPENAI_RESPONSES_URL,
+            "model": model,
+            "request": &request,
+            "options": options,
+        });
+        let body = openai_request_body(model, request);
+        let account_id = {
+            let tokens = self.tokens.lock().await;
+            tokens.account_id.clone()
+        };
+        let headers = openai_oauth_headers(&access_token, account_id.as_deref());
+
+        let response = self
+            .http
+            .post(OPENAI_RESPONSES_URL)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| anyhow!("OpenAI OAuth request failed: {error}"))?;
+
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|error| anyhow!("OpenAI OAuth response read failed: {error}"))?;
+        log_llm_interaction(
+            if status.is_success() {
+                "chat_openai_oauth"
+            } else {
+                "chat_openai_oauth_error"
+            },
+            model,
+            request_log,
+            json!({
+                "ok": status.is_success(),
+                "status": status.as_u16(),
+                "body": serde_json::from_str::<Value>(&text)
+                    .unwrap_or_else(|_| json!({"raw_text": text.clone()})),
+            }),
+        );
+
+        if !status.is_success() {
+            return Err(anyhow!(
+                "OpenAI OAuth API error: {} - {}",
+                status.as_u16(),
+                truncate_error(&text)
+            ));
+        }
+
+        let data: Value = serde_json::from_str(&text).with_context(|| {
+            format!(
+                "invalid OpenAI OAuth response JSON: {}",
+                truncate_error(&text)
+            )
+        })?;
+        openai_response_to_chat_response(data, model).map_err(Into::into)
+    }
+
+    async fn ensure_access(&self) -> Result<()> {
+        let refresh_token = {
+            let tokens = self.tokens.lock().await;
+            if tokens.env_access_token || !tokens.needs_refresh() {
+                return Ok(());
+            }
+            tokens.refresh_token.clone()
+        };
+        let Some(refresh_token) = refresh_token else {
+            return Ok(());
+        };
+
+        let response = self
+            .http
+            .post(OPENAI_OAUTH_TOKEN_URL)
+            .json(&json!({
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": OPENAI_OAUTH_CLIENT_ID,
+            }))
+            .send()
+            .await
+            .map_err(|error| anyhow!("OpenAI OAuth token refresh failed: {error}"))?;
+
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|error| anyhow!("OpenAI OAuth refresh response read failed: {error}"))?;
+        if !status.is_success() {
+            return Err(anyhow!(
+                "OpenAI OAuth token refresh failed: {} {}",
+                status.as_u16(),
+                truncate_error(&text)
+            ));
+        }
+
+        let data: Value = serde_json::from_str(&text).with_context(|| {
+            format!(
+                "invalid OpenAI OAuth refresh JSON: {}",
+                truncate_error(&text)
+            )
+        })?;
+        let access_token = data
+            .get("access_token")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("OpenAI OAuth refresh response is missing access_token"))?
+            .to_string();
+        let refresh_token = data
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let expires_in = data
+            .get("expires_in")
+            .and_then(Value::as_f64)
+            .unwrap_or(3600.0);
+        let account_id = data
+            .get("account_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                data.get("id_token")
+                    .and_then(Value::as_str)
+                    .and_then(extract_openai_account_id)
+            });
+
+        let snapshot = {
+            let mut tokens = self.tokens.lock().await;
+            tokens.access_token = Some(access_token);
+            if let Some(refresh_token) = refresh_token {
+                tokens.refresh_token = Some(refresh_token);
+            }
+            if account_id.is_some() {
+                tokens.account_id = account_id;
+            }
+            tokens.expires_at = Some(unix_now_seconds() + expires_in);
+            tokens.clone()
+        };
+        write_openai_oauth_tokens(&self.token_file, &snapshot)?;
+        Ok(())
+    }
+}
+
+impl OpenAIOAuthTokens {
+    fn needs_refresh(&self) -> bool {
+        let Some(refresh_token) = &self.refresh_token else {
+            return false;
+        };
+        if refresh_token.trim().is_empty() {
+            return false;
+        }
+        self.expires_at.unwrap_or(0.0) <= unix_now_seconds() + 60.0
+    }
+}
+
+fn openai_request_body(model: &str, request: ChatRequest) -> Value {
+    let ChatRequest {
+        system, messages, ..
+    } = request;
+
+    let mut instructions = Vec::new();
+    let mut input = Vec::new();
+
+    if let Some(system) = system.filter(|system| !system.trim().is_empty()) {
+        instructions.push(system);
+    }
+
+    for message in messages {
+        match message.role {
+            ChatRole::System => {
+                for text in message.content.texts() {
+                    if !text.trim().is_empty() {
+                        instructions.push(text.to_string());
+                    }
+                }
+            }
+            ChatRole::User => input.extend(openai_user_input(message.content)),
+            ChatRole::Assistant => input.extend(openai_assistant_input(message.content)),
+            ChatRole::Tool => input.extend(openai_tool_input(message.content)),
+        }
+    }
+
+    if input.is_empty() {
+        input.push(json!({
+            "role": "user",
+            "content": [{"type": "input_text", "text": "[Continue]"}],
+        }));
+    }
+
+    let mut body = json!({
+        "model": model,
+        "input": input,
+        "store": false,
+        "stream": false,
+    });
+    let instructions = instructions.join("\n\n").trim().to_string();
+    if !instructions.is_empty() {
+        body["instructions"] = Value::String(instructions);
+    }
+    body
+}
+
+fn openai_user_input(content: MessageContent) -> Vec<Value> {
+    vec![json!({
+        "role": "user",
+        "content": openai_content_blocks(content, true),
+    })]
+}
+
+fn openai_assistant_input(content: MessageContent) -> Vec<Value> {
+    let mut input = Vec::new();
+    let mut text_blocks = Vec::new();
+    for part in content.into_parts() {
+        match part {
+            ContentPart::Text(text) => {
+                if !text.trim().is_empty() {
+                    text_blocks.push(json!({"type": "output_text", "text": text}));
+                }
+            }
+            ContentPart::ToolCall(call) => input.push(json!({
+                "type": "function_call",
+                "call_id": call.call_id,
+                "name": call.fn_name,
+                "arguments": call.fn_arguments,
+            })),
+            ContentPart::ThoughtSignature(_)
+            | ContentPart::Binary(_)
+            | ContentPart::ToolResponse(_) => {}
+        }
+    }
+    if !text_blocks.is_empty() {
+        input.push(json!({
+            "role": "assistant",
+            "content": text_blocks,
+        }));
+    }
+    input
+}
+
+fn openai_tool_input(content: MessageContent) -> Vec<Value> {
+    let mut input = Vec::new();
+    for part in content.into_parts() {
+        match part {
+            ContentPart::ToolResponse(response) => input.push(json!({
+                "type": "function_call_output",
+                "call_id": response.call_id,
+                "output": response.content,
+            })),
+            ContentPart::Text(text) => {
+                if !text.trim().is_empty() {
+                    input.push(json!({
+                        "type": "function_call_output",
+                        "call_id": "",
+                        "output": text,
+                    }));
+                }
+            }
+            ContentPart::ToolCall(_)
+            | ContentPart::Binary(_)
+            | ContentPart::ThoughtSignature(_) => {}
+        }
+    }
+    input
+}
+
+fn openai_content_blocks(content: MessageContent, include_images: bool) -> Vec<Value> {
+    let mut blocks = Vec::new();
+    for part in content.into_parts() {
+        match part {
+            ContentPart::Text(text) => {
+                if !text.trim().is_empty() {
+                    blocks.push(json!({"type": "input_text", "text": text}));
+                }
+            }
+            ContentPart::Binary(binary) => {
+                let is_image = binary.is_image();
+                let content_type = binary.content_type;
+                match binary.source {
+                    BinarySource::Base64(data) => {
+                        if include_images && is_image {
+                            blocks.push(json!({
+                                "type": "input_image",
+                                "image_url": format!("data:{};base64,{}", content_type, data.as_ref()),
+                            }));
+                        } else if !is_image {
+                            blocks.push(json!({
+                                "type": "input_text",
+                                "text": format!("[{} attachment]", content_type),
+                            }));
+                        }
+                    }
+                    BinarySource::Url(url) => {
+                        if include_images && is_image {
+                            blocks.push(json!({"type": "input_image", "image_url": url}));
+                        } else if !is_image {
+                            blocks.push(json!({
+                                "type": "input_text",
+                                "text": format!("[{} attachment: {url}]", content_type),
+                            }));
+                        }
+                    }
+                }
+            }
+            ContentPart::ToolResponse(response) => blocks.push(json!({
+                "type": "function_call_output",
+                "call_id": response.call_id,
+                "output": response.content,
+            })),
+            ContentPart::ToolCall(call) => blocks.push(json!({
+                "type": "text",
+                "text": format!("[tool call {} omitted in user content]", call.fn_name),
+            })),
+            ContentPart::ThoughtSignature(_) => {}
+        }
+    }
+    if blocks.is_empty() {
+        blocks.push(json!({"type": "input_text", "text": ""}));
+    }
+    blocks
+}
+
+fn openai_response_to_chat_response(data: Value, requested_model: &str) -> Result<ChatResponse> {
+    let response = data.get("response").unwrap_or(&data);
+    let mut parts = Vec::new();
+    if let Some(items) = response.get("output").and_then(Value::as_array) {
+        for item in items {
+            match item.get("type").and_then(Value::as_str).unwrap_or("") {
+                "message" => {
+                    if let Some(content) = item.get("content").and_then(Value::as_array) {
+                        for block in content {
+                            if block.get("type").and_then(Value::as_str) == Some("output_text")
+                                && let Some(text) = block.get("text").and_then(Value::as_str)
+                                && !text.is_empty()
+                            {
+                                parts.push(ContentPart::Text(text.to_string()));
+                            }
+                        }
+                    }
+                }
+                "function_call" => {
+                    let call_id = item
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .or_else(|| item.get("call_id").and_then(Value::as_str))
+                        .unwrap_or_default()
+                        .to_string();
+                    let fn_name = item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let fn_arguments = item
+                        .get("arguments")
+                        .cloned()
+                        .map(|value| {
+                            if value.is_string() {
+                                serde_json::from_str(value.as_str().unwrap_or_default())
+                                    .unwrap_or_else(|_| json!({"raw": value}))
+                            } else {
+                                value
+                            }
+                        })
+                        .unwrap_or_else(|| json!({}));
+                    parts.push(ContentPart::ToolCall(ToolCall {
+                        call_id,
+                        fn_name,
+                        fn_arguments,
+                        thought_signatures: None,
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let provider_model = response
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| requested_model.to_string());
+    let mut usage = Usage::default();
+    if let Some(raw_usage) = response.get("usage") {
+        let input_tokens = raw_usage
+            .get("input_tokens")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32);
+        let output_tokens = raw_usage
+            .get("output_tokens")
+            .and_then(Value::as_i64)
+            .map(|value| value as i32);
+        usage.prompt_tokens = input_tokens;
+        usage.completion_tokens = output_tokens;
+        usage.total_tokens = input_tokens
+            .zip(output_tokens)
+            .map(|(input, output)| input + output);
+        if let Some(cached) = raw_usage
+            .get("input_tokens_details")
+            .and_then(|details| details.get("cached_tokens"))
+            .and_then(Value::as_i64)
+            .map(|value| value as i32)
+        {
+            usage.prompt_tokens_details = Some(PromptTokensDetails {
+                cache_creation_tokens: None,
+                cached_tokens: Some(cached),
+                audio_tokens: None,
+            });
+        }
+        usage.compact_details();
+    }
+
+    Ok(ChatResponse {
+        content: MessageContent::from_parts(parts),
+        reasoning_content: None,
+        model_iden: ModelIden::new(AdapterKind::OpenAI, requested_model),
+        provider_model_iden: ModelIden::new(AdapterKind::OpenAI, provider_model),
+        usage,
+        captured_raw_body: None,
+    })
+}
+
+fn openai_oauth_headers(access_token: &str, account_id: Option<&str>) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", "application/json".parse().unwrap());
+    headers.insert("accept", "application/json".parse().unwrap());
+    headers.insert(
+        "authorization",
+        format!("Bearer {access_token}").parse().unwrap(),
+    );
+    headers.insert("OpenAI-Beta", "responses=experimental".parse().unwrap());
+    if let Some(account_id) = account_id.filter(|account_id| !account_id.trim().is_empty()) {
+        headers.insert("chatgpt-account-id", account_id.trim().parse().unwrap());
+    }
+    headers
+}
+
+pub fn read_openai_oauth_tokens(path: &Path) -> Option<OpenAIOAuthTokens> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut tokens: OpenAIOAuthTokens = serde_json::from_str(&text).ok()?;
+    tokens.env_access_token = false;
+    tokens
+        .access_token
+        .as_ref()
+        .is_some_and(|token| !token.trim().is_empty())
+        .then_some(tokens)
+}
+
+pub fn write_openai_oauth_tokens(path: &Path, tokens: &OpenAIOAuthTokens) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        bail!("OpenAI OAuth token path has no parent: {}", path.display());
+    };
+    std::fs::create_dir_all(parent)?;
+    let text = serde_json::to_string_pretty(tokens)?;
+    std::fs::write(path, text)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+pub fn extract_openai_account_id(token: &str) -> Option<String> {
+    let mut parts = token.split('.');
+    let _header = parts.next()?;
+    let payload = parts.next()?;
+    let _signature = parts.next()?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
+        .ok()?;
+    let value: Value = serde_json::from_slice(&decoded).ok()?;
+    value
+        .get("chatgpt_account_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            value
+                .get("organizations")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(|first| first.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
 }
 
 #[derive(Clone)]
@@ -887,18 +1465,15 @@ fn should_use_anthropic_oauth(model: &str, config: &LlmRouterConfig) -> bool {
 
 pub fn llm_auth_mode_for_settings(settings: &Settings) -> String {
     let config = LlmRouterConfig::from_settings(settings);
-    let main = auth_mode_for_model(config.model_for(false), &config);
-    let aux = auth_mode_for_model(config.model_for(true), &config);
-    if main == aux {
-        main
-    } else {
-        format!("main={main}, aux={aux}")
-    }
+    auth_mode_for_model(config.model_for(false), &config)
 }
 
 fn auth_mode_for_model(model: &str, config: &LlmRouterConfig) -> String {
     if should_use_anthropic_oauth(model, config) && anthropic_oauth_available() {
         return "anthropic_oauth".to_string();
+    }
+    if should_use_openai_oauth(model, config) {
+        return "openai_oauth".to_string();
     }
     let configured_provider = normalized_provider(&config.provider);
     let provider = slash_provider(model)
@@ -917,6 +1492,30 @@ fn auth_mode_for_model(model: &str, config: &LlmRouterConfig) -> String {
         other if !other.is_empty() => format!("{other}_auth"),
         _ => "auto".to_string(),
     }
+}
+
+fn should_use_openai_oauth(model: &str, config: &LlmRouterConfig) -> bool {
+    if normalize_api_base(&config.api_base).is_some() {
+        return false;
+    }
+    if slash_provider(model) == Some("openrouter") {
+        return false;
+    }
+    if normalized_provider(&config.provider).as_deref() == Some("openrouter") {
+        return false;
+    }
+
+    openai_oauth_available()
+        && openai_model_candidate(model, config)
+        && openai_oauth_supported_model(model)
+}
+
+fn openai_model_candidate(model: &str, config: &LlmRouterConfig) -> bool {
+    let raw_model = model.trim();
+    let stripped_model = strip_slash_provider(raw_model, "openai");
+    slash_provider(raw_model) == Some("openai")
+        || normalized_provider(&config.provider).as_deref() == Some("openai")
+        || provider_for_model(stripped_model) == Some("openai")
 }
 
 fn anthropic_oauth_available() -> bool {
@@ -1703,6 +2302,7 @@ fn into_message_content(content: String, attachments: Vec<LlmAttachment>) -> Mes
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn aux_model_falls_back_to_main_model() {
@@ -1717,6 +2317,41 @@ mod tests {
 
         assert_eq!(config.model_for(false), "gpt-5");
         assert_eq!(config.model_for(true), "gpt-5");
+    }
+
+    #[test]
+    fn openai_oauth_token_file_round_trips() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("openai_oauth_tokens.json");
+        let tokens = OpenAIOAuthTokens {
+            access_token: Some("access".to_string()),
+            refresh_token: Some("refresh".to_string()),
+            expires_at: Some(1234.0),
+            account_id: Some("acct_123".to_string()),
+            env_access_token: false,
+        };
+
+        write_openai_oauth_tokens(&path, &tokens).unwrap();
+        let loaded = read_openai_oauth_tokens(&path).unwrap();
+
+        assert_eq!(loaded.access_token.as_deref(), Some("access"));
+        assert_eq!(loaded.refresh_token.as_deref(), Some("refresh"));
+        assert_eq!(loaded.account_id.as_deref(), Some("acct_123"));
+    }
+
+    #[test]
+    fn openai_oauth_subscription_auth_mode_is_reported_for_supported_models() {
+        unsafe {
+            std::env::set_var("OPENAI_AUTH_TOKEN", "access");
+        }
+        let mut settings = crate::config::test_settings(std::path::Path::new("/tmp/lethe"));
+        settings.llm.llm_model = "gpt-5.3-codex".to_string();
+
+        assert_eq!(llm_auth_mode_for_settings(&settings), "openai_oauth");
+
+        unsafe {
+            std::env::remove_var("OPENAI_AUTH_TOKEN");
+        }
     }
 
     #[test]

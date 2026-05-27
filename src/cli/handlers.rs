@@ -16,6 +16,7 @@ use lethe::conversation::transcription::{
 use lethe::llm::prompts::{PromptSource, PromptStore};
 use lethe::llm::{LlmMessage, LlmRouter, LlmRouterConfig, llm_auth_mode_for_settings};
 use lethe::memory::BlockManager;
+use lethe::memory::MemoryStore;
 use lethe::memory::archival::ArchivalMemory;
 use lethe::memory::message_metadata::{
     MessageKind, MessageVisibility, metadata_value as message_metadata_value,
@@ -26,7 +27,6 @@ use lethe::memory::recall::{Hippocampus, HippocampusConfig};
 use lethe::scheduler::curator::MemoryCurator;
 use lethe::scheduler::heartbeat::{Heartbeat, HeartbeatConfig, render_summary_prompt};
 use lethe::scheduler::proactive::{ActiveReminder, format_active_reminders};
-use lethe::memory::MemoryStore;
 use lethe::todos::{NewTodo, TodoFilter, TodoManager, TodoPriority, TodoStatus, TodoUpdate};
 use lethe::tools::filesystem::FileTools;
 use lethe::tools::shell::ShellTools;
@@ -114,10 +114,9 @@ pub(crate) async fn check() -> Result<()> {
     } else {
         let embedder = memory.archival.embedder().clone();
         match embedder.embed_query("lethe check probe") {
-            Ok(vector) if !vector.is_empty() => println!(
-                "  [OK]   embeddings — produced {}-dim vector",
-                vector.len()
-            ),
+            Ok(vector) if !vector.is_empty() => {
+                println!("  [OK]   embeddings — produced {}-dim vector", vector.len())
+            }
             Ok(_) => println!("  [FAIL] embeddings — returned empty vector"),
             Err(error) => {
                 println!("  [FAIL] embeddings: {error}");
@@ -350,8 +349,13 @@ pub(crate) async fn agent_command(command: AgentCommand) -> Result<()> {
     let options = AgentOptions {
         use_hippocampus: !matches!(
             &command,
-            AgentCommand::Chat { no_recall: true, .. }
-                | AgentCommand::Prepare { no_recall: true, .. }
+            AgentCommand::Chat {
+                no_recall: true,
+                ..
+            } | AgentCommand::Prepare {
+                no_recall: true,
+                ..
+            }
         ),
         ..Default::default()
     };
@@ -557,8 +561,9 @@ pub(crate) async fn memory_command(command: MemoryCommand) -> Result<()> {
         }
         MemoryCommand::Curate { force } => {
             let curator = MemoryCurator::new(settings.paths.memory_dir.join("curator_state.json"));
-            let router =
-                lethe::llm::client::LlmRouter::new(lethe::llm::client::LlmRouterConfig::from_settings(&settings));
+            let router = lethe::llm::client::LlmRouter::new(
+                lethe::llm::client::LlmRouterConfig::from_settings(&settings),
+            );
             let stats = curator.run_pass(&store, &router, force).await?;
             println!("{}", serde_json::to_string_pretty(&stats)?);
         }

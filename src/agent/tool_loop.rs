@@ -19,8 +19,8 @@ use uuid::Uuid;
 use crate::actor::{ActorError, ActorRunSpec, ActorRuntime, ActorTurnExecutor, ModelTier};
 use crate::config::Settings;
 use crate::llm::{LlmAttachment, LlmMessage, LlmRouter, build_chat_request};
-use crate::memory::MessageRole;
 use crate::memory::MemoryStore;
+use crate::memory::MessageRole;
 use crate::tools::registry::{ActorToolContext, BoxToolFuture, ToolRegistry, ToolRuntime};
 use crate::tools::shell::ShellTools;
 
@@ -109,10 +109,9 @@ fn truncate_chars(value: &str, limit: usize) -> String {
 fn recover_text_tool_calls(content: &str) -> Vec<ToolCall> {
     static OUTER: OnceLock<Regex> = OnceLock::new();
     static QUOTED: OnceLock<Regex> = OnceLock::new();
-    let outer = OUTER
-        .get_or_init(|| Regex::new(r"(?s)<tool_call:(\w+)\{(.+?)\}>").expect("valid regex"));
-    let quoted =
-        QUOTED.get_or_init(|| Regex::new(r#"(\w+):"([^"]*)""#).expect("valid regex"));
+    let outer =
+        OUTER.get_or_init(|| Regex::new(r"(?s)<tool_call:(\w+)\{(.+?)\}>").expect("valid regex"));
+    let quoted = QUOTED.get_or_init(|| Regex::new(r#"(\w+):"([^"]*)""#).expect("valid regex"));
 
     let mut calls = Vec::new();
     for caps in outer.captures_iter(content) {
@@ -299,7 +298,10 @@ pub(super) async fn complete_turn_with_tools_config_shared(
             // on second strike, fall through to the no-tools wrap-up.
             empty_count += 1;
             if empty_count >= MAX_EMPTY_RESPONSES {
-                tracing::warn!(empty_count, "model stuck on empty responses, forcing wrap-up");
+                tracing::warn!(
+                    empty_count,
+                    "model stuck on empty responses, forcing wrap-up"
+                );
                 break;
             }
             tracing::warn!(empty_count, "empty response, nudging model");
@@ -648,13 +650,15 @@ mod tests {
 
     #[test]
     fn recover_text_tool_calls_parses_gemma_style() {
-        let content =
-            "let me check this. <tool_call:read_file{file_path:\"/tmp/foo.txt\"}> done.";
+        let content = "let me check this. <tool_call:read_file{file_path:\"/tmp/foo.txt\"}> done.";
         let calls = recover_text_tool_calls(content);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].fn_name, "read_file");
         assert_eq!(
-            calls[0].fn_arguments.get("file_path").and_then(Value::as_str),
+            calls[0]
+                .fn_arguments
+                .get("file_path")
+                .and_then(Value::as_str),
             Some("/tmp/foo.txt")
         );
     }

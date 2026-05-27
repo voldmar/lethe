@@ -3,6 +3,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::llm::models::{
+    openai_oauth_available, openai_oauth_supported_model, provider_for_model,
+};
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum RuntimeMode {
     Telegram,
@@ -66,6 +70,7 @@ impl LlmConfig {
                     .to_string(),
             );
         }
+        let openai_oauth_active = openai_oauth_available();
         let has_auth = !self.openrouter_api_key.trim().is_empty()
             || !self.openai_api_key.trim().is_empty()
             || std::env::var("ANTHROPIC_API_KEY")
@@ -73,15 +78,29 @@ impl LlmConfig {
                 .is_some_and(|value| !value.trim().is_empty())
             || std::env::var("ANTHROPIC_AUTH_TOKEN")
                 .ok()
-                .is_some_and(|value| !value.trim().is_empty());
+                .is_some_and(|value| !value.trim().is_empty())
+            || openai_oauth_active;
         if !has_auth {
             return Err(format!(
                 "No LLM auth key configured for model `{}`. Run `lethe init`,\n\
                  or set one of: OPENROUTER_API_KEY, ANTHROPIC_API_KEY,\n\
-                 OPENAI_API_KEY (or ANTHROPIC_AUTH_TOKEN for Claude Code subscribers).",
+                 OPENAI_API_KEY (or ANTHROPIC_AUTH_TOKEN / OPENAI_AUTH_TOKEN\n\
+                 for subscription logins, with LETHE_OPENAI_OAUTH_TOKENS for a\n\
+                 saved OpenAI token file).",
                 self.llm_model
             ));
         }
+
+        if let Some(message) = openai_subscription_blocked_message(
+            &self.llm_model,
+            &self.llm_provider,
+            &self.llm_api_base,
+            &self.openai_api_key,
+            openai_oauth_active,
+        ) {
+            return Err(message);
+        }
+
         Ok(())
     }
 
@@ -289,6 +308,31 @@ fn env_i64_list(key: &str) -> Vec<i64> {
         .collect()
 }
 
+fn openai_subscription_blocked_message(
+    llm_model: &str,
+    llm_provider: &str,
+    llm_api_base: &str,
+    openai_api_key: &str,
+    openai_oauth_active: bool,
+) -> Option<String> {
+    if !llm_api_base.trim().is_empty() || !openai_oauth_active || !openai_api_key.trim().is_empty()
+    {
+        return None;
+    }
+
+    let provider = provider_for_model(llm_model).unwrap_or_else(|| llm_provider.trim());
+    if provider.eq_ignore_ascii_case("openai") && !openai_oauth_supported_model(llm_model) {
+        return Some(format!(
+            "OpenAI subscription auth only supports Codex/chatgpt models.\n\
+             Selected model `{}` is not in the allowlist. Use OPENAI_API_KEY\n\
+             or switch to a Codex/chatgpt model before continuing.",
+            llm_model
+        ));
+    }
+
+    None
+}
+
 /// Minimal Settings instance for tests and examples. Always available so
 /// integration tests in the binary crate can use it (cfg(test)-gated items
 /// in the lib are invisible to the binary).
@@ -365,5 +409,24 @@ mod tests {
         assert_eq!(settings.effective_aux_model(), "gpt-5");
         settings.llm.llm_model_aux = "gpt-5-mini".to_string();
         assert_eq!(settings.effective_aux_model(), "gpt-5-mini");
+    }
+
+    #[test]
+    fn openai_subscription_allowlist_is_enforced_only_for_native_openai_models() {
+        assert!(
+            openai_subscription_blocked_message("gpt-5.3-codex", "openai", "", "", true,).is_none()
+        );
+
+        let message = openai_subscription_blocked_message("gpt-5.2", "openai", "", "", true)
+            .expect("non-allowlisted model should fail");
+        assert!(message.contains("Codex/chatgpt"));
+    }
+
+    #[test]
+    fn openai_api_key_still_allows_non_allowlisted_models() {
+        let mut settings = test_settings(std::path::Path::new("/tmp/lethe"));
+        settings.llm.llm_model = "gpt-5.2".to_string();
+        settings.llm.openai_api_key = "sk-test".to_string();
+        assert!(settings.llm.ensure_ready().is_ok());
     }
 }

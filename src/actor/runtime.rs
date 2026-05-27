@@ -424,8 +424,7 @@ impl Message<BuildRequestableDirectory> for ActorSupervisor {
         message: BuildRequestableDirectory,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.registry
-            .build_requestable_directory(&message.actor_id)
+        self.registry.build_requestable_directory(&message.actor_id)
     }
 }
 

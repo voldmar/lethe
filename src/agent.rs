@@ -31,8 +31,8 @@ use crate::llm::{
 use crate::memory::message_metadata::MessageMetadata;
 use crate::memory::messages::{MessageHistoryError, MessageRole, StoredMessage};
 use crate::memory::recall::{Hippocampus, HippocampusConfig, HippocampusError};
-use crate::scheduler::curator::{CuratorError, CuratorRunStats, MemoryCurator};
 use crate::memory::{MemoryStore, MemoryStoreError};
+use crate::scheduler::curator::{CuratorError, CuratorRunStats, MemoryCurator};
 use crate::tools::registry::{
     ActorToolContext, SharedActorRegistry, ToolRuntime, requestable_tools_directory_for,
 };
@@ -282,13 +282,8 @@ impl Agent {
         Ok(turn)
     }
 
-    async fn requestable_tools_directory_async(
-        &self,
-        req: &TurnRequest,
-    ) -> AgentResult<String> {
-        if let (Some(registry), Some(actor_id)) =
-            (&self.actor_registry, &self.principal_actor_id)
-        {
+    async fn requestable_tools_directory_async(&self, req: &TurnRequest) -> AgentResult<String> {
+        if let (Some(registry), Some(actor_id)) = (&self.actor_registry, &self.principal_actor_id) {
             return registry
                 .build_requestable_directory(actor_id)
                 .await
@@ -410,9 +405,7 @@ impl Agent {
                 let router = self
                     .router
                     .read()
-                    .map_err(|error| {
-                        AgentError::Llm(anyhow!("router lock poisoned: {error}"))
-                    })?
+                    .map_err(|error| AgentError::Llm(anyhow!("router lock poisoned: {error}")))?
                     .clone();
                 crate::actor::background::review_notifications_with_llm(
                     candidates,
@@ -438,7 +431,11 @@ impl Agent {
             if !message.role.is_user() && !message.role.is_assistant() {
                 continue;
             }
-            let role = if message.role.is_user() { "user" } else { "assistant" };
+            let role = if message.role.is_user() {
+                "user"
+            } else {
+                "assistant"
+            };
             let content = message.content.trim();
             if content.is_empty() {
                 continue;
@@ -548,7 +545,6 @@ impl Agent {
     }
 }
 
-
 pub fn prepare_turn(
     settings: &Settings,
     memory: &MemoryStore,
@@ -619,7 +615,10 @@ impl SystemParts {
     /// Flatten back to a single string. Used by tests that still assert on the
     /// monolithic prompt shape.
     pub fn render_joined(&self) -> String {
-        match (self.stable.trim().is_empty(), self.volatile.trim().is_empty()) {
+        match (
+            self.stable.trim().is_empty(),
+            self.volatile.trim().is_empty(),
+        ) {
             (true, true) => String::new(),
             (false, true) => self.stable.clone(),
             (true, false) => self.volatile.clone(),
@@ -704,7 +703,6 @@ fn history_records_for_turn(recent: Vec<StoredMessage>) -> Vec<StoredMessage> {
     drop_history_before_first_user(&mut history);
     history
 }
-
 
 fn is_visible_history_record(message: &StoredMessage) -> bool {
     if MessageMetadata::from_value(Some(&message.metadata)).is_internal() {
@@ -791,15 +789,15 @@ fn extract_historical_tool_calls(metadata: &Value) -> Vec<HistoricalToolCall> {
                                 .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
                         })
                         .unwrap_or(Value::Object(serde_json::Map::new()));
-                    let thought_signatures =
-                        call.get("thought_signatures").and_then(Value::as_array).map(
-                            |values| {
-                                values
-                                    .iter()
-                                    .filter_map(|value| value.as_str().map(str::to_string))
-                                    .collect::<Vec<_>>()
-                            },
-                        );
+                    let thought_signatures = call
+                        .get("thought_signatures")
+                        .and_then(Value::as_array)
+                        .map(|values| {
+                            values
+                                .iter()
+                                .filter_map(|value| value.as_str().map(str::to_string))
+                                .collect::<Vec<_>>()
+                        });
                     Some(HistoricalToolCall {
                         call_id: call_id.to_string(),
                         fn_name: fn_name.to_string(),
@@ -1063,16 +1061,13 @@ fn archive_old_tool_results(messages: &mut [LlmMessage], inline_cap: usize) {
     }
 }
 
-fn drop_oldest_to_target(
-    messages: &mut Vec<LlmMessage>,
-    target_chars: usize,
-) -> Vec<LlmMessage> {
+fn drop_oldest_to_target(messages: &mut Vec<LlmMessage>, target_chars: usize) -> Vec<LlmMessage> {
     // Always keep at least the last two messages so the LLM has SOME
     // immediate context to react to.
     const MIN_RETAINED: usize = 2;
     let proposed = weighted_keep_cutoff(messages, target_chars);
-    let cutoff = pair_safe_cutoff(messages, proposed)
-        .min(messages.len().saturating_sub(MIN_RETAINED));
+    let cutoff =
+        pair_safe_cutoff(messages, proposed).min(messages.len().saturating_sub(MIN_RETAINED));
 
     let mut dropped = Vec::with_capacity(cutoff);
     for _ in 0..cutoff {
@@ -1216,7 +1211,11 @@ mod tests {
             .unwrap();
         memory
             .messages
-            .add(MessageRole::Tool, "secret tool output", Some(json!({"name": "bash"})))
+            .add(
+                MessageRole::Tool,
+                "secret tool output",
+                Some(json!({"name": "bash"})),
+            )
             .unwrap();
         memory
             .messages
@@ -1246,9 +1245,17 @@ mod tests {
             .iter()
             .map(|message| message.content.as_str())
             .collect::<Vec<_>>();
-        assert!(!contents.iter().any(|c| c.contains("I will inspect that now.")));
+        assert!(
+            !contents
+                .iter()
+                .any(|c| c.contains("I will inspect that now."))
+        );
         assert!(!contents.iter().any(|c| c.contains("secret tool output")));
-        assert!(contents.iter().any(|c| c.ends_with("previous visible user request")));
+        assert!(
+            contents
+                .iter()
+                .any(|c| c.ends_with("previous visible user request"))
+        );
         assert!(contents.contains(&"previous visible answer"));
         let system = system_content(&turn.messages);
         assert!(!system.contains("recent_tool_history"));
@@ -1534,7 +1541,11 @@ mod tests {
 
         memory
             .messages
-            .add(MessageRole::User, "internal heartbeat prompt", Some(internal.clone()))
+            .add(
+                MessageRole::User,
+                "internal heartbeat prompt",
+                Some(internal.clone()),
+            )
             .unwrap();
         memory
             .messages
@@ -1564,8 +1575,16 @@ mod tests {
             .iter()
             .map(|message| message.content.as_str())
             .collect::<Vec<_>>();
-        assert!(!contents.iter().any(|c| c.contains("internal heartbeat prompt")));
-        assert!(!contents.iter().any(|c| c.contains("internal heartbeat answer")));
+        assert!(
+            !contents
+                .iter()
+                .any(|c| c.contains("internal heartbeat prompt"))
+        );
+        assert!(
+            !contents
+                .iter()
+                .any(|c| c.contains("internal heartbeat answer"))
+        );
         assert!(contents.iter().any(|c| c.ends_with("visible question")));
     }
 

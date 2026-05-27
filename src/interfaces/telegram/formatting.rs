@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-
 /// Map a Telegram parse-mode hint to the API value, returning `None` for
 /// "no formatting".
 pub fn telegram_parse_mode(value: &str) -> Option<&'static str> {

@@ -24,7 +24,10 @@ fn unknown_user_notify_kind_defaults_to_info() {
         MessageIntent::Info
     );
     // Strict parse: exact aliases match, compound/unknown strings default to Info.
-    assert_eq!(MessageIntent::from_strings("", "warning"), MessageIntent::Alert);
+    assert_eq!(
+        MessageIntent::from_strings("", "warning"),
+        MessageIntent::Alert
+    );
     assert_eq!(
         MessageIntent::from_strings("", "deadline"),
         MessageIntent::Reminder
@@ -91,7 +94,11 @@ fn registry_spawns_discovers_and_cleans_terminated_actors() {
             .is_empty()
     );
 
-    assert!(registry.terminate(&worker, Outcome::Success, "done").unwrap());
+    assert!(
+        registry
+            .terminate(&worker, Outcome::Success, "done")
+            .unwrap()
+    );
     assert_eq!(registry.active_count(), 1);
     assert_eq!(registry.discover("main").len(), 2);
     assert_eq!(registry.discover_active("main").len(), 1);
@@ -328,9 +335,7 @@ fn actor_tool_methods_kill_terminate_restart_and_finished_listing() {
     let terminate =
         registry.terminate_tool(&worker, "All done", "partial", "src/lib.rs", "run tests");
     assert!(terminate.contains("Terminated"));
-    let finished = registry
-        .discover_for_actor(&principal, None, true)
-        .unwrap();
+    let finished = registry.discover_for_actor(&principal, None, true).unwrap();
     assert!(finished.contains("researcher"));
     assert!(finished.contains("[outcome: partial]"));
     assert!(finished.contains("[files: src/lib.rs]"));

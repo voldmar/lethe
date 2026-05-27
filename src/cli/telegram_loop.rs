@@ -1096,10 +1096,11 @@ async fn process_telegram_once(
                 continue;
             }
             last_chat_id = Some(reaction.chat_id);
-            agent
-                .memory()
-                .messages
-                .add(MessageRole::User, &reaction.content(), Some(reaction.metadata()))?;
+            agent.memory().messages.add(
+                MessageRole::User,
+                &reaction.content(),
+                Some(reaction.metadata()),
+            )?;
             processed += 1;
         }
     }

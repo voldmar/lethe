@@ -471,7 +471,6 @@ pub enum HeartbeatCommand {
     },
 }
 
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let settings = Settings::from_env();
@@ -615,8 +614,6 @@ fn default_command_for_mode(mode: &RuntimeMode) -> Command {
         RuntimeMode::Cli => Command::Check,
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

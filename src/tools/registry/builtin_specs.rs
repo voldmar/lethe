@@ -40,8 +40,9 @@ fn exec_memory_list(registry: &ToolRegistry<'_>, args: &Value) -> String {
         .blocks
         .list_blocks(bool_arg(args, "include_hidden", false))
     {
-        Ok(blocks) => serde_json::to_string_pretty(&blocks)
-            .unwrap_or_else(|error| format!("Error: {error}")),
+        Ok(blocks) => {
+            serde_json::to_string_pretty(&blocks).unwrap_or_else(|error| format!("Error: {error}"))
+        }
         Err(error) => format!("Error: {error}"),
     }
 }
@@ -110,9 +111,9 @@ fn exec_memory_complete(registry: &ToolRegistry<'_>, args: &Value) -> String {
         return "Error: target is required (memory id or note file path).".to_string();
     }
     match registry.memory.complete_memory(&target) {
-        Ok(Some(id)) => format!(
-            "Marked {id} as done. It stays searchable but appears compressed in recall."
-        ),
+        Ok(Some(id)) => {
+            format!("Marked {id} as done. It stays searchable but appears compressed in recall.")
+        }
         Ok(None) => format!("No memory found for target: {target}"),
         Err(error) => format!("Error: {error}"),
     }
@@ -365,14 +366,20 @@ pub const TOOL_DEFS: &[ToolDef] = &[
     ToolDef {
         name: "memory_complete",
         description: "Mark an archival entry or note as done. It stays searchable but is rendered as a one-line marker in recall (full text via archival_get / note_search). Use when a thread is resolved.",
-        params: &[p_str_req("target", "Memory id (mem-...) or note file path.")],
+        params: &[p_str_req(
+            "target",
+            "Memory id (mem-...) or note file path.",
+        )],
         category: ToolCategory::CortexOnly,
         execute: ToolExecutor::Sync(exec_memory_complete),
     },
     ToolDef {
         name: "memory_reopen",
         description: "Clear the done flag on an archival entry or note (inverse of memory_complete).",
-        params: &[p_str_req("target", "Memory id (mem-...) or note file path.")],
+        params: &[p_str_req(
+            "target",
+            "Memory id (mem-...) or note file path.",
+        )],
         category: ToolCategory::Requestable,
         execute: ToolExecutor::Sync(exec_memory_reopen),
     },

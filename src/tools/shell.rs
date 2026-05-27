@@ -691,9 +691,7 @@ fn is_executable_file(path: &Path) -> bool {
 use serde_json::Value;
 
 use crate::tools::registry::ToolRegistry;
-use crate::tools::registry::args::{
-    bool_arg, string_arg, string_arg_default, u64_arg, usize_arg,
-};
+use crate::tools::registry::args::{bool_arg, string_arg, string_arg_default, u64_arg, usize_arg};
 use crate::tools::spec::{ToolCategory, ToolDef, ToolExecutor, p_bool, p_int, p_str, p_str_req};
 
 fn exec_bash(registry: &ToolRegistry<'_>, args: &Value) -> String {

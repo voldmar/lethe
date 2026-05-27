@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
 const EMBEDDED_MODEL_CATALOG: &str = include_str!("../../config/model_catalog.json");
-const EMBEDDED_CONTEXT_LIMITS: &str =
-    include_str!("../../config/model_context_limits.json");
+const EMBEDDED_CONTEXT_LIMITS: &str = include_str!("../../config/model_context_limits.json");
 
 pub type ModelCatalog = BTreeMap<String, BTreeMap<String, Vec<ModelEntry>>>;
 
@@ -40,7 +40,10 @@ pub fn model_catalog() -> &'static ModelCatalog {
 }
 
 pub fn available_providers() -> Vec<ProviderInfo> {
-    available_providers_with(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+    available_providers_with(|key| match key {
+        "OPENAI_AUTH_TOKEN" => openai_oauth_available(),
+        _ => std::env::var_os(key).is_some_and(|value| !value.is_empty()),
+    })
 }
 
 pub fn available_providers_with(mut env_has: impl FnMut(&str) -> bool) -> Vec<ProviderInfo> {
@@ -51,7 +54,10 @@ pub fn available_providers_with(mut env_has: impl FnMut(&str) -> bool) -> Vec<Pr
         .flat_map(|(provider, auth_options)| {
             auth_options
                 .iter()
-                .filter(|(env_var, _)| env_has(env_var))
+                .filter(|(env_var, _)| match *env_var {
+                    "OPENAI_AUTH_TOKEN" => env_has(env_var) || openai_oauth_available(),
+                    _ => env_has(env_var),
+                })
                 .map(|(_, auth)| ProviderInfo {
                     provider: (*provider).to_string(),
                     label: provider_label(provider, auth),
@@ -60,6 +66,68 @@ pub fn available_providers_with(mut env_has: impl FnMut(&str) -> bool) -> Vec<Pr
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+pub fn openai_oauth_available() -> bool {
+    std::env::var("OPENAI_AUTH_TOKEN")
+        .ok()
+        .is_some_and(|token| !token.trim().is_empty())
+        || openai_oauth_available_at(&openai_oauth_token_file())
+}
+
+pub fn openai_oauth_available_at(path: &std::path::Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    data.get("access_token")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|token| !token.trim().is_empty())
+}
+
+pub fn openai_oauth_token_file() -> PathBuf {
+    if let Some(path) = std::env::var_os("LETHE_OPENAI_OAUTH_TOKENS") {
+        return PathBuf::from(path);
+    }
+    if let Some(path) = std::env::var_os("CREDENTIALS_DIR") {
+        return PathBuf::from(path).join("openai_oauth_tokens.json");
+    }
+    let home = std::env::var_os("LETHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".lethe")))
+        .unwrap_or_else(|| PathBuf::from(".lethe"));
+    home.join("credentials").join("openai_oauth_tokens.json")
+}
+
+pub fn openai_oauth_supported_model(model_id: &str) -> bool {
+    let model_id = model_id.trim();
+    if model_id.is_empty() {
+        return false;
+    }
+    let model_id = model_id
+        .strip_prefix("openai/")
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(model_id)
+        .trim();
+    let Some(openai_catalog) = model_catalog().get("openai") else {
+        return false;
+    };
+
+    openai_catalog
+        .values()
+        .flat_map(|entries| entries.iter())
+        .any(|entry| entry.model_id() == model_id && openai_oauth_catalog_entry(entry))
+}
+
+fn openai_oauth_catalog_entry(entry: &ModelEntry) -> bool {
+    let name = entry.name().to_ascii_lowercase();
+    let model_id = entry.model_id().to_ascii_lowercase();
+    name.contains("codex")
+        || name.contains("chatgpt")
+        || model_id.contains("codex")
+        || model_id.contains("chatgpt")
 }
 
 /// Per-model context window (tokens), as declared in
@@ -112,7 +180,7 @@ fn provider_for_model_fallback(model_id: &str) -> Option<&'static str> {
         Some("openrouter")
     } else if lower.contains("claude") {
         Some("anthropic")
-    } else if lower.contains("gpt") {
+    } else if lower.contains("gpt") || lower.contains("codex") || lower.contains("chatgpt") {
         Some("openai")
     } else {
         None
@@ -123,7 +191,10 @@ fn provider_auth_options() -> &'static [(&'static str, &'static [(&'static str, 
     &[
         ("openrouter", &[("OPENROUTER_API_KEY", "API")]),
         ("anthropic", &[("ANTHROPIC_API_KEY", "API")]),
-        ("openai", &[("OPENAI_API_KEY", "API")]),
+        (
+            "openai",
+            &[("OPENAI_AUTH_TOKEN", "sub"), ("OPENAI_API_KEY", "API")],
+        ),
     ]
 }
 
@@ -139,7 +210,8 @@ fn provider_label(provider: &str, auth: &str) -> String {
     }
     let suffix = match auth {
         "API" => "API key",
-        _ => auth,
+        "sub" => "subscription",
+        other => other,
     };
     format!("{base} ({suffix})")
 }
@@ -147,6 +219,7 @@ fn provider_label(provider: &str, auth: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn embedded_catalog_strips_metadata_and_loads_models() {
@@ -169,13 +242,39 @@ mod tests {
             Some("openrouter")
         );
         assert_eq!(provider_for_model("gpt-future"), Some("openai"));
+        assert_eq!(provider_for_model("chatgpt-5.4"), Some("openai"));
+        assert_eq!(provider_for_model("codex-foo"), Some("openai"));
         assert_eq!(provider_for_model("unknown-model"), None);
     }
 
     #[test]
+    fn openai_oauth_available_at_reads_tokens_from_disk() {
+        let tmp = tempdir().unwrap();
+        let token_file = tmp.path().join("openai_oauth_tokens.json");
+        std::fs::write(
+            &token_file,
+            serde_json::json!({"access_token": "access"}).to_string(),
+        )
+        .unwrap();
+
+        assert!(openai_oauth_available_at(&token_file));
+    }
+
+    #[test]
+    fn openai_oauth_supported_models_use_catalog_allowlist() {
+        assert!(openai_oauth_supported_model("gpt-5.3-codex"));
+        assert!(openai_oauth_supported_model("openai/gpt-5.3-codex"));
+        assert!(!openai_oauth_supported_model("gpt-5.2"));
+    }
+
+    #[test]
     fn available_providers_follow_configured_auth_order() {
-        let available =
-            available_providers_with(|key| matches!(key, "ANTHROPIC_API_KEY" | "OPENAI_API_KEY"));
+        let available = available_providers_with(|key| {
+            matches!(
+                key,
+                "ANTHROPIC_API_KEY" | "OPENAI_AUTH_TOKEN" | "OPENAI_API_KEY"
+            )
+        });
 
         assert_eq!(
             available,
@@ -187,10 +286,19 @@ mod tests {
                 },
                 ProviderInfo {
                     provider: "openai".to_string(),
+                    label: "OpenAI (subscription)".to_string(),
+                    auth: "sub".to_string(),
+                },
+                ProviderInfo {
+                    provider: "openai".to_string(),
                     label: "OpenAI (API key)".to_string(),
                     auth: "API".to_string(),
                 },
             ]
         );
+
+        unsafe {
+            std::env::remove_var("LETHE_OPENAI_OAUTH_TOKENS");
+        }
     }
 }
